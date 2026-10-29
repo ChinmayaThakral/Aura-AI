@@ -30,7 +30,12 @@ export class WebSocketHandler {
     connect() {
         return new Promise((resolve, reject) => {
             this.is_intentionally_closing = false;
-            let url = "ws://127.0.0.1:8002/ws";
+            // Derive the host from the page origin. main.py picks a free port at
+            // startup and falls back off 8002 when it is busy, so a hardcoded port
+            // would break the socket exactly when the fallback kicks in.
+            const host = window.location.host || '127.0.0.1:8002';
+            const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            let url = `${scheme}//${host}/ws`;
             if (this.session_id) {
                 url += `?session_id=${this.session_id}`;
             }
@@ -285,9 +290,26 @@ export class WebSocketHandler {
 
     sendAudioChunk(chunk, is_muted) {
         this.sendMessage('audio_chunk', {
-            audio: Array.from(new Uint8Array(chunk)),
+            audio_b64: this.bytesToBase64(chunk),
             is_muted: is_muted
         });
+    }
+
+    /**
+     * Base64-encode a PCM buffer for transport.
+     *
+     * Sending the raw bytes as a JSON array of integers cost roughly 4 bytes of
+     * text per byte of audio; base64 costs 1.33. Encoded in slices because
+     * String.fromCharCode.apply exceeds the argument limit on large buffers.
+     */
+    bytesToBase64(buffer) {
+        const bytes = new Uint8Array(buffer);
+        const SLICE = 0x8000;
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += SLICE) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + SLICE));
+        }
+        return btoa(binary);
     }
 
     startInterview() {

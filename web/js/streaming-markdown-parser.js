@@ -2,6 +2,7 @@
 // Integrates with existing MarkdownProcessor for incremental rendering
 
 import { MarkdownProcessor } from './markdown-processor.js';
+import { maskMath, maskFencedCode, maskInlineCode, findUnclosedDisplayMath } from './math-renderer.js';
 
 export class StreamingMarkdownParser {
     constructor() {
@@ -29,6 +30,9 @@ export class StreamingMarkdownParser {
         this.lastProcessedContent = '';
         this.processedLength = 0;
         this.lastRenderedHTML = '';
+        // Raw (unescaped) code-block bodies, keyed by block id, so the copy
+        // button can read them from JS instead of being inlined into markup.
+        this.codeBlockSources = new Map();
     }
 
     /**
@@ -68,7 +72,10 @@ export class StreamingMarkdownParser {
             newContent.includes('**') ||                            // Bold formatting
             newContent.includes('`') ||                             // Code formatting
             newContent.includes('[') ||                             // Link start
-            newContent.includes('](')                               // Link completion
+            newContent.includes('](') ||                            // Link completion
+            newContent.includes('$') ||                             // Math delimiter
+            newContent.includes('\\]') ||                           // Display math close
+            newContent.includes('\\)')                              // Inline math close
         ) {
             return true;
         }
@@ -134,28 +141,60 @@ export class StreamingMarkdownParser {
             content = content.substring(0, lastCodeBlock);
         }
         
-        // Don't process incomplete inline formatting
-        const lastAsterisk = content.lastIndexOf('**');
-        const lastBacktick = content.lastIndexOf('`');
-        const lastBracket = content.lastIndexOf('[');
-        
-        // If there's an opening marker without a close, truncate
-        if (lastAsterisk > -1 && !content.slice(lastAsterisk + 2).includes('**')) {
-            content = content.substring(0, lastAsterisk);
+        // Don't process a display equation ($$ or \[) until its closer arrives,
+        // otherwise every chunk re-renders half an equation
+        const unclosedMath = findUnclosedDisplayMath(content);
+        if (unclosedMath > -1) {
+            content = content.substring(0, unclosedMath);
         }
-        
-        if (lastBacktick > -1 && !content.slice(lastBacktick + 1).includes('`')) {
-            content = content.substring(0, lastBacktick);
-        }
-        
-        if (lastBracket > -1 && !content.slice(lastBracket).includes('](')) {
-            content = content.substring(0, lastBracket);
+
+        // Don't process incomplete inline formatting. Markers are searched in
+        // same-length copies (so indexes line up) with code and math blanked
+        // out: equations are full of `[` and `*`, code full of `**`. Fences go
+        // first so a `$` inside code can't pair with one after the fence.
+        const masked = maskMath(maskFencedCode(content));
+        const maskedProse = maskInlineCode(masked);
+        const cutPoints = [
+            this.findUnclosedPairedMarker(maskedProse, '**'),
+            this.findUnclosedPairedMarker(masked, '`'),
+            this.findUnclosedLink(maskedProse)
+        ].filter(index => index > -1);
+
+        // Truncate at the earliest unclosed marker
+        if (cutPoints.length > 0) {
+            content = content.substring(0, Math.min(...cutPoints));
         }
         
         // Filter thinking content AFTER determining safe content boundaries
         content = this.filterThinkingContent(content);
         
         return content;
+    }
+
+    /**
+     * Index of the last `marker` if it opens a pair that hasn't closed yet
+     * (odd number of markers), else -1.
+     */
+    findUnclosedPairedMarker(text, marker) {
+        const count = text.split(marker).length - 1;
+        return count % 2 === 1 ? text.lastIndexOf(marker) : -1;
+    }
+
+    /**
+     * Index of a trailing `[` that may still become a link, else -1. A `[`
+     * whose `]` already arrived and isn't followed by `(` is plain text
+     * (e.g. `array[0]`, `[1]`) and must not hold back the rest of the reply.
+     */
+    findUnclosedLink(text) {
+        const lastBracket = text.lastIndexOf('[');
+        if (lastBracket === -1) return -1;
+
+        const tail = text.slice(lastBracket);
+        const close = tail.indexOf(']');
+        const linkStillOpen = close === -1                                  // [text...
+            || close === tail.length - 1                                    // [text]  ( may follow
+            || (tail[close + 1] === '(' && !tail.includes(')', close));     // [text](url...
+        return linkStillOpen ? lastBracket : -1;
     }
 
     /**
@@ -192,13 +231,52 @@ export class StreamingMarkdownParser {
         const content = this.escapeHtml(block.content);
         const blockId = `code-block-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         
+        // Keep the raw body in JS rather than inlining it into an onclick handler.
+        this.codeBlockSources.set(blockId, block.content);
+
         // Generate code block with proper padding and spacing
-        const html = `<div class="code-block-container" data-block-id="${blockId}" style="margin:0.75rem 0!important;padding:0!important;max-width:100%!important;overflow-x:hidden!important;word-wrap:break-word!important;border-radius:6px!important;"><div class="code-block-header" style="padding:0.4rem 1.25rem!important;"><span class="code-language">${language}</span><button class="copy-button" onclick="navigator.clipboard.writeText(\`${this.escapeHtml(block.content)}\`)">📋</button></div><pre class="code-block language-${language}" style="padding:1rem 1.25rem!important;margin:0!important;"><code class="language-${language}">${content}</code></pre></div>`;
-        
-        // Schedule syntax highlighting for this block
-        setTimeout(() => this.applySyntaxHighlighting(blockId), 10);
-        
+        const html = `<div class="code-block-container" data-block-id="${blockId}" style="margin:0.75rem 0!important;padding:0!important;max-width:100%!important;overflow-x:hidden!important;word-wrap:break-word!important;border-radius:6px!important;"><div class="code-block-header" style="padding:0.4rem 1.25rem!important;"><span class="code-language">${language}</span><button class="copy-button" type="button" title="Copy code">📋</button></div><pre class="code-block language-${language}" style="padding:1rem 1.25rem!important;margin:0!important;"><code class="language-${language}">${content}</code></pre></div>`;
+
+        // Schedule syntax highlighting and copy-button wiring for this block
+        setTimeout(() => {
+            this.applySyntaxHighlighting(blockId);
+            this.attachCopyHandler(blockId);
+        }, 10);
+
         return html;
+    }
+
+    /**
+     * Wire the copy button for a rendered code block.
+     *
+     * The handler closes over the raw source instead of being written into an
+     * onclick attribute: the previous inline form interpolated model-generated
+     * code into a JS template literal inside HTML, so any code containing a
+     * backtick or ${...} broke the button and could execute arbitrary script.
+     */
+    attachCopyHandler(blockId) {
+        try {
+            const blockElement = document.querySelector(`[data-block-id="${blockId}"]`);
+            if (!blockElement) return;
+
+            const button = blockElement.querySelector('.copy-button');
+            if (!button || button.dataset.copyBound === 'true') return;
+
+            const source = this.codeBlockSources.get(blockId) || '';
+            button.dataset.copyBound = 'true';
+            button.addEventListener('click', async () => {
+                try {
+                    await navigator.clipboard.writeText(source);
+                    button.textContent = '✅';
+                } catch (err) {
+                    console.warn('🔍 Copy failed:', err);
+                    button.textContent = '❌';
+                }
+                setTimeout(() => { button.textContent = '📋'; }, 2000);
+            });
+        } catch (error) {
+            console.warn('🔍 Copy button wiring error:', error);
+        }
     }
     
     /**
