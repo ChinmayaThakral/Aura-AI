@@ -22,19 +22,47 @@ class MixedProcessor extends AudioWorkletProcessor {
         this.batchFill = 0;
         this.micLevelSum = 0;
         this.systemLevelSum = 0;
+        // At most half a second of native audio, never an unbounded backlog.
+        this.nativeSamples = new Float32Array(24000);
+        this.nativeRead = 0;
+        this.nativeWrite = 0;
+        this.nativeCount = 0;
+        this.nativeEnabled = false;
+        this.port.onmessage = event => {
+            const {type, samples} = event.data || {};
+            if (type !== 'native-system-audio' || !ArrayBuffer.isView(samples)) return;
+            this.nativeEnabled = true;
+            for (let index = Math.max(0, samples.length - this.nativeSamples.length); index < samples.length; index++) {
+                if (this.nativeCount === this.nativeSamples.length) {
+                    this.nativeRead = (this.nativeRead + 1) % this.nativeSamples.length;
+                    this.nativeCount--;
+                }
+                this.nativeSamples[this.nativeWrite] = samples[index];
+                this.nativeWrite = (this.nativeWrite + 1) % this.nativeSamples.length;
+                this.nativeCount++;
+            }
+        };
     }
 
     process(inputs, outputs, parameters) {
         // We expect two inputs: [0] = microphone, [1] = system audio
         const micInput = inputs[0] && inputs[0][0] ? inputs[0][0] : new Float32Array(128);
         const systemInput = inputs[1] && inputs[1][0] ? inputs[1][0] : new Float32Array(128);
-        
+
         const frameLength = Math.max(micInput.length, systemInput.length);
         if (frameLength === 0) return true;
 
         for (let i = 0; i < frameLength; i++) {
             const micSample = i < micInput.length ? micInput[i] : 0;
-            const systemSample = i < systemInput.length ? systemInput[i] : 0;
+            let systemSample = i < systemInput.length ? systemInput[i] : 0;
+            if (this.nativeEnabled) {
+                systemSample = this.nativeCount ? this.nativeSamples[this.nativeRead] : 0;
+                if (this.nativeCount) {
+                    this.nativeRead = (this.nativeRead + 1) % this.nativeSamples.length;
+                    this.nativeCount--;
+                }
+            }
+
 
             // Mix the audio (simple addition with slight attenuation).
             // Math.fround reproduces the float32 rounding the old code got for

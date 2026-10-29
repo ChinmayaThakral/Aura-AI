@@ -7,7 +7,7 @@
 #   - Screen-capture     → NSWindow.setSharingType_(NSWindowSharingNone)
 #   - Click-through      → NSWindow.setIgnoresMouseEvents_()
 #   - Show/hide          → NSWindow.orderOut_() / orderFrontRegardless()
-#   - Global hotkeys     → NSEvent (requires Input Monitoring permission)
+#   - Global hotkeys     → NSEvent (requires Accessibility permission for global keys)
 #
 # Public API is identical to the Windows version so main.py and api/ need no changes.
 
@@ -15,6 +15,7 @@ import os
 import platform
 import time
 import tempfile
+import uuid
 from typing import Optional
 from threading import Thread
 
@@ -29,19 +30,19 @@ from pynput import keyboard
 def _get_scroll_amount_px() -> int:
     """Return SCROLL_SPEED_PX from settings, falling back to 200."""
     try:
-        from core.config import settings
-        return getattr(settings, "SCROLL_SPEED_PX", 200)
-    except Exception:
-        return int(os.environ.get("SCROLL_SPEED_PX", "200"))
+        from core.env_utils import env_manager
+        return max(1, int(os.environ.get("SCROLL_SPEED_PX") or env_manager.get_value("SCROLL_SPEED_PX") or 200))
+    except (ValueError, TypeError):
+        return 200
 
 
 def _get_scroll_interval_ms() -> int:
     """Return SCROLL_INTERVAL_MS from settings, falling back to 50."""
     try:
-        from core.config import settings
-        return getattr(settings, "SCROLL_INTERVAL_MS", 50)
-    except Exception:
-        return int(os.environ.get("SCROLL_INTERVAL_MS", "50"))
+        from core.env_utils import env_manager
+        return max(10, int(os.environ.get("SCROLL_INTERVAL_MS") or env_manager.get_value("SCROLL_INTERVAL_MS") or 50))
+    except (ValueError, TypeError):
+        return 50
 
 # ---------------------------------------------------------------------------
 # macOS Accessibility permission check
@@ -50,9 +51,8 @@ def _has_accessibility_permission() -> bool:
     """Return True if the process has macOS Accessibility permission.
 
     Uses AXIsProcessTrustedWithOptions() from ApplicationServices.
-    Note: NSEvent global monitors actually require 'Input Monitoring'
-    (Privacy & Security → Input Monitoring), not Accessibility.
-    This function is kept for informational purposes only.
+    NSEvent global key monitoring requires Accessibility trust. macOS may
+    also request Input Monitoring access for keyboard monitoring.
     """
     if not IS_MACOS:
         return True
@@ -77,8 +77,13 @@ if IS_MACOS:
         NSFloatingWindowLevel,
         NSNormalWindowLevel,
         NSWindowSharingNone,
+        NSWindowCollectionBehaviorCanJoinAllSpaces,
+        NSWindowCollectionBehaviorFullScreenAuxiliary,
+        NSWindowCollectionBehaviorFullScreenPrimary,
+        NSWindowCollectionBehaviorFullScreenNone,
+        NSWindowCollectionBehaviorMoveToActiveSpace,
     )
-    from Foundation import NSPoint
+    from Foundation import NSPoint, NSMakeRect, NSObject, NSThread
 else:
     # Graceful degradation if somehow imported on another platform
     NSApp = None
@@ -89,20 +94,74 @@ else:
 
 
 # ---------------------------------------------------------------------------
+# Main-thread dispatch
+# ---------------------------------------------------------------------------
+# On macOS, every NSWindow mutation (level, sharing type, alpha, frame, etc.)
+# MUST happen on the AppKit main thread. macOS 14+/26 hard-enforces this: an
+# off-main-thread window change triggers NSWMWindowCoordinator on the calling
+# thread and the process is killed with "Must only be used from the main
+# thread". pywebview fires window events (and our hotkey actions) on background
+# threads, so we marshal all window work onto the main thread synchronously.
+if IS_MACOS:
+
+    class _MainThreadBox:
+        """Mutable, pass-by-reference carrier so results survive the ObjC hop."""
+        __slots__ = ("fn", "result", "error")
+
+        def __init__(self, fn):
+            self.fn = fn
+            self.result = None
+            self.error = None
+
+    class _MainThreadRunner(NSObject):
+        def runBox_(self, box):
+            try:
+                box.result = box.fn()
+            except Exception as exc:  # noqa: BLE001 — propagate to caller thread
+                box.error = exc
+
+    _mt_runner = _MainThreadRunner.alloc().init()
+
+    def _run_on_main_thread(fn):
+        """Run *fn* on the AppKit main thread synchronously; return its result."""
+        if NSThread.isMainThread():
+            return fn()
+        box = _MainThreadBox(fn)
+        # A custom instance bridges as an opaque object (by reference), so
+        # box.result / box.error written on the main thread are visible here.
+        _mt_runner.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "runBox:", box, True
+        )
+        if box.error is not None:
+            raise box.error
+        return box.result
+
+else:
+
+    def _run_on_main_thread(fn):
+        return fn()
+
+
+# ---------------------------------------------------------------------------
 # Internal helper — locate the Aura NSWindow
 # ---------------------------------------------------------------------------
 def _get_aura_ns_window():
-    """Return the NSWindow instance for the 'Aura' window, or None."""
+    """Resolve Aura's own native window even when Chrome has keyboard focus."""
     if not IS_MACOS or NSApp is None:
         return None
+
+    def resolve():
+        for window in webview.windows:
+            native = getattr(window, "native", None)
+            if native is not None:
+                return native
+        for window in NSApp.windows():
+            if window.title() == "Aura":
+                return window
+        return None
+
     try:
-        for w in NSApp.windows():
-            if w.title() == "Aura":
-                return w
-        # Fallback: use the key (active) window
-        main = NSApp.mainWindow()
-        if main:
-            return main
+        return _run_on_main_thread(resolve)
     except Exception as exc:
         print(f"⚠️  Could not locate Aura NSWindow: {exc}")
     return None
@@ -134,6 +193,8 @@ class WindowManager:
         # Hotkey listeners
         self.hotkey_listener = None
         self._scroll_listener = None
+        self.command_callback = None
+        self.is_desktop_display = False
 
     # ------------------------------------------------------------------ #
     # Transparency                                                         #
@@ -157,8 +218,10 @@ class WindowManager:
         try:
             ns_win = _get_aura_ns_window()
             if ns_win:
-                ns_win.setAlphaValue_(transparency)
-                ns_win.setOpaque_(transparency >= 1.0)
+                def _apply():
+                    ns_win.setAlphaValue_(transparency)
+                    ns_win.setOpaque_(transparency >= 1.0)
+                _run_on_main_thread(_apply)
                 print(f"✅ Window transparency set to {transparency * 100:.0f}%")
                 return True
             print("⚠️  NSWindow not found for transparency change")
@@ -170,6 +233,14 @@ class WindowManager:
     def get_transparency(self) -> float:
         """Return the last-set alpha value (0.0 = invisible, 1.0 = opaque)."""
         return self.current_transparency
+
+    def step_transparency(self, direction: int) -> bool:
+        levels = [0.2, 0.4, 0.6, 0.8, 1.0]
+        if direction > 0:
+            target = next((level for level in levels if level > self.current_transparency + 0.01), 1.0)
+        else:
+            target = next((level for level in reversed(levels) if level < self.current_transparency - 0.01), 0.2)
+        return self.set_transparency(target)
 
     def set_transparency_percent(self, percent: int) -> bool:
         """Set transparency from a 0–100 integer percentage."""
@@ -200,7 +271,23 @@ class WindowManager:
             ns_win = _get_aura_ns_window()
             if ns_win:
                 level = NSFloatingWindowLevel if on_top else NSNormalWindowLevel
-                ns_win.setLevel_(level)
+                def apply():
+                    ns_win.setLevel_(level)
+                    if on_top:
+                        import AppKit
+                        behavior = int(ns_win.collectionBehavior())
+                        behavior &= ~(NSWindowCollectionBehaviorFullScreenPrimary
+                                      | NSWindowCollectionBehaviorFullScreenNone
+                                      | NSWindowCollectionBehaviorMoveToActiveSpace)
+                        behavior |= (NSWindowCollectionBehaviorCanJoinAllSpaces
+                                     | NSWindowCollectionBehaviorFullScreenAuxiliary)
+                        if hasattr(AppKit, 'NSWindowCollectionBehaviorCanJoinAllApplications'):
+                            behavior &= ~(AppKit.NSWindowCollectionBehaviorPrimary
+                                          | AppKit.NSWindowCollectionBehaviorAuxiliary)
+                            behavior |= AppKit.NSWindowCollectionBehaviorCanJoinAllApplications
+                        ns_win.setCollectionBehavior_(behavior)
+                        ns_win.setHidesOnDeactivate_(False)
+                _run_on_main_thread(apply)
                 status = "always-on-top" if on_top else "normal stacking"
                 print(f"📌 Window set to {status}")
                 return True
@@ -208,6 +295,46 @@ class WindowManager:
             return False
         except Exception as exc:
             print(f"❌ Error setting always-on-top: {exc}")
+            return False
+
+    def set_desktop_display(self, enabled: bool) -> bool:
+        """Size the reader before the interview without activating the window."""
+        entering = enabled and not self.is_desktop_display
+        ns_win = _get_aura_ns_window()
+        if not ns_win:
+            return False
+
+        def apply():
+            if enabled:
+                if not getattr(self, '_display_previous_frame', None):
+                    self._display_previous_frame = ns_win.frame()
+                visible = ns_win.screen().visibleFrame()
+                width = min(480, visible.size.width - 32)
+                height = min(640, visible.size.height - 32)
+                ns_win.setFrame_display_(NSMakeRect(
+                    visible.origin.x + visible.size.width - width - 16,
+                    visible.origin.y + visible.size.height - height - 16,
+                    width, height
+                ), True)
+            elif getattr(self, '_display_previous_frame', None):
+                ns_win.setFrame_display_(self._display_previous_frame, True)
+                self._display_previous_frame = None
+
+        try:
+            _run_on_main_thread(apply)
+            success = self.set_always_on_top(True)
+            if success:
+                # Only start pass-through when Option+X can restore the controls
+                # after a click sends keyboard focus back to Chrome.
+                if entering:
+                    success = self.set_ghost_mode(self.can_restore_click_through())
+                elif not enabled:
+                    success = self.set_ghost_mode(False)
+                if success:
+                    self.is_desktop_display = enabled
+            return success
+        except Exception as exc:
+            print(f"Could not configure desktop display: {exc}")
             return False
 
     # ------------------------------------------------------------------ #
@@ -227,7 +354,7 @@ class WindowManager:
         try:
             ns_win = _get_aura_ns_window()
             if ns_win:
-                ns_win.setSharingType_(NSWindowSharingNone)
+                _run_on_main_thread(lambda: ns_win.setSharingType_(NSWindowSharingNone))
                 print("🛡️  Screen capture protection applied (NSWindowSharingNone)")
                 return True
             print("⚠️  NSWindow not found for capture protection")
@@ -240,25 +367,60 @@ class WindowManager:
     # Ghost / click-through mode                                           #
     # ------------------------------------------------------------------ #
 
-    def set_ghost_mode(self, enabled: bool) -> None:
+    def can_restore_click_through(self) -> bool:
+        """The global Option+X monitor must work before clicks can be ignored."""
+        return getattr(self, "_key_down_monitor", None) is not None and _has_accessibility_permission()
+
+    def get_click_through_state(self) -> dict:
+        def read():
+            ns_win = _get_aura_ns_window()
+            available = ns_win is not None
+            if available:
+                self.is_ghost_mode = bool(ns_win.ignoresMouseEvents())
+            return {
+                "available": available,
+                "click_through": self.is_ghost_mode if available else False,
+                "shortcuts_ready": self.can_restore_click_through(),
+            }
+
+        return _run_on_main_thread(read)
+
+    def set_ghost_mode(self, enabled: bool) -> bool:
         """
         Enable or disable click-through mode.
         Uses NSWindow.setIgnoresMouseEvents_ — native macOS pass-through.
         """
-        try:
+        if enabled and not self.can_restore_click_through():
+            print("Click-through requires Accessibility and the global Option+X monitor. Restart Aura after granting access.")
+            return False
+
+        def apply():
             ns_win = _get_aura_ns_window()
-            if ns_win:
-                ns_win.setIgnoresMouseEvents_(enabled)
-                self.is_ghost_mode = enabled
-                label = "Enabled (click-through)" if enabled else "Disabled (normal)"
-                icon = "👻" if enabled else "🖱️"
-                print(f"{icon} Ghost Mode {label}")
+            if ns_win is None:
+                return False
+            ns_win.setIgnoresMouseEvents_(enabled)
+            self.is_ghost_mode = bool(ns_win.ignoresMouseEvents())
+            return self.is_ghost_mode == enabled
+
+        try:
+            return _run_on_main_thread(apply)
         except Exception as exc:
             print(f"❌ Error setting ghost mode: {exc}")
+            return False
 
-    def toggle_ghost_mode(self) -> None:
+    def toggle_ghost_mode(self) -> bool:
         """Flip ghost/click-through mode between enabled and disabled."""
-        self.set_ghost_mode(not self.is_ghost_mode)
+        def apply():
+            ns_win = _get_aura_ns_window()
+            if ns_win is None:
+                return False
+            return self.set_ghost_mode(not bool(ns_win.ignoresMouseEvents()))
+
+        try:
+            return _run_on_main_thread(apply)
+        except Exception as exc:
+            print(f"❌ Error toggling ghost mode: {exc}")
+            return False
 
     # ------------------------------------------------------------------ #
     # Visibility (show / hide)                                             #
@@ -270,10 +432,10 @@ class WindowManager:
             ns_win = _get_aura_ns_window()
             if ns_win:
                 if ns_win.isVisible():
-                    ns_win.orderOut_(None)
+                    _run_on_main_thread(lambda: ns_win.orderOut_(None))
                     print("🕵️  Window hidden (stealth)")
                 else:
-                    ns_win.orderFrontRegardless()
+                    _run_on_main_thread(ns_win.orderFrontRegardless)
                     self.set_always_on_top(True)
                     print("✨ Window shown (stealth — no focus steal)")
         except Exception as exc:
@@ -302,7 +464,7 @@ class WindowManager:
                 # macOS origin is bottom-left; dy is intentionally inverted
                 new_x = frame.origin.x + dx
                 new_y = frame.origin.y - dy
-                ns_win.setFrameOrigin_(NSPoint(new_x, new_y))
+                _run_on_main_thread(lambda: ns_win.setFrameOrigin_(NSPoint(new_x, new_y)))
                 print(f"🎯 Window moved ({dx:+d}px, {dy:+d}px)")
                 return True
             return False
@@ -362,12 +524,12 @@ class WindowManager:
                     win = webview.windows[0]
                     if self.scrolling_up:
                         win.evaluate_js(
-                            f'document.getElementById("conversation-stream")'
+                            f'(document.getElementById("conversation-stream") || document.getElementById("answer"))'
                             f'?.scrollBy({{top:-{amount},behavior:"smooth"}})'
                         )
                     elif self.scrolling_down:
                         win.evaluate_js(
-                            f'document.getElementById("conversation-stream")'
+                            f'(document.getElementById("conversation-stream") || document.getElementById("answer"))'
                             f'?.scrollBy({{top:{amount},behavior:"smooth"}})'
                         )
             except Exception:
@@ -401,20 +563,19 @@ class WindowManager:
         NSApplication run loop (started by pywebview) so there is no CFRunLoop
         conflict and no SIGTRAP.
 
-        event.charactersIgnoringModifiers() returns the base letter regardless
-        of which modifier keys are held, so Option+Z always yields 'z' — no
-        unicode translation table is required.
+        event.Physical key codes keep Option shortcuts stable when macOS generates
+        symbols such as µ or ß for modified letters.
 
-        Requires Input Monitoring permission in
-        System Settings → Privacy & Security → Input Monitoring.
-        (NOT Accessibility — that controls UI automation, not key monitoring.)
+        Global key monitoring requires Aura to be trusted in
+        System Settings → Privacy & Security → Accessibility.
+        Enable Input Monitoring too if macOS requests it.
         """
         print("⌨️  Starting global hotkey listener (NSEvent)…")
         if _has_accessibility_permission():
-            print("   ✅ Accessibility OK (informational)")
-        print("   ℹ️  Global hotkeys require Input Monitoring permission:")
-        print("      System Settings → Privacy & Security → Input Monitoring")
-        print("      Add Terminal.app (or your shell) → toggle ON → restart Aura.")
+            print("   ✅ Accessibility permission OK")
+        print("   ℹ️  Global hotkeys require Accessibility permission:")
+        print("      System Settings → Privacy & Security → Accessibility")
+        print("      Add Aura.app (or the launching terminal for a source run), enable it, then restart Aura.")
 
         # ── Command file bridge ──────────────────────────────────────────
         def _send_command(data: dict) -> None:
@@ -422,6 +583,10 @@ class WindowManager:
             Prevents main.py's polling reader from seeing a half-written JSON blob.
             """
             try:
+                data["event_id"] = uuid.uuid4().hex
+                if self.command_callback:
+                    self.command_callback(data)
+                    return
                 cmd_file = os.path.join(tempfile.gettempdir(), "aura_command.json")
                 tmp_file = f"{cmd_file}.tmp"
                 data["source"] = "global_hotkey"
@@ -440,6 +605,8 @@ class WindowManager:
             '1': lambda: self.set_transparency(1.0),
             '2': lambda: self.set_transparency(0.7),
             '3': lambda: self.set_transparency(0.4),
+            '[': lambda: self.step_transparency(-1),
+            ']': lambda: self.step_transparency(1),
             'm': lambda: _send_command({"command": "toggle_mic_mute"}),
             'u': lambda: _send_command({"command": "toggle_universal_mute"}),
             'q': lambda: _send_command({"command": "switch_preset", "preset_key": "primary"}),
@@ -457,32 +624,48 @@ class WindowManager:
         _NSKeyDownMask    = 1 << 10   # 1024
         _NSKeyUpMask      = 1 << 11   # 2048
         _NSAltKeyMask     = 1 << 19   # NSAlternateKeyMask
+        _NSShiftKeyMask   = 1 << 17
+        _NSCommandOrControl = (1 << 20) | (1 << 18)
         _KEY_ARROW_UP     = 126       # kVK_UpArrow
         _KEY_ARROW_DOWN   = 125       # kVK_DownArrow
+        _ARROW_MOVES = {123: (-20, 0), 124: (20, 0), 125: (0, 20), 126: (0, -20)}
+        _KEY_NAMES = {0: 'a', 1: 's', 2: 'd', 3: 'f', 6: 'z', 7: 'x',
+                      9: 'v', 12: 'q', 13: 'w', 14: 'e', 15: 'r',
+                      18: '1', 19: '2', 20: '3', 30: ']', 33: '[', 32: 'u', 46: 'm'}
 
         # ── Key-down handler ─────────────────────────────────────────────
         def _on_key_down(event) -> None:
             """Dispatch hotkeys and start scroll on ⌥↑ / ⌥↓."""
-            if not (event.modifierFlags() & _NSAltKeyMask):
-                return
+            flags = event.modifierFlags()
+            if not (flags & _NSAltKeyMask) or flags & _NSCommandOrControl:
+                return False
 
             key_code = event.keyCode()
+
+            if flags & _NSShiftKeyMask:
+                if key_code in _ARROW_MOVES:
+                    self.move_window(*_ARROW_MOVES[key_code])
+                    return True
+                return False
 
             # Scroll ─────────────────────────────────────────────────────
             if key_code == _KEY_ARROW_UP:
                 self._start_scroll("up")
-                return
+                return True
             if key_code == _KEY_ARROW_DOWN:
                 self._start_scroll("down")
-                return
+                return True
 
             # Hotkey ─────────────────────────────────────────────────────
-            # charactersIgnoringModifiers() gives 'z' even for Option+Z
-            chars = event.charactersIgnoringModifiers()
+            # Use physical key codes rather than Option-modified characters.
+            chars = _KEY_NAMES.get(key_code)
             if chars:
                 action = _HOTKEY_ACTIONS.get(chars.lower())
                 if action:
-                    Thread(target=action, daemon=True).start()
+                    if not event.isARepeat():
+                        action()
+                    return True
+            return False
 
         # ── Key-up handler ───────────────────────────────────────────────
         def _on_key_up(event) -> None:
@@ -496,21 +679,65 @@ class WindowManager:
             if not (flags & _NSAltKeyMask):
                 self._stop_scroll()
 
+        # Local-monitor wrappers: these fire only while the Aura window is the
+        # focused app, and — unlike global monitors — need NO Input Monitoring
+        # permission. A local handler must return the event to let it through,
+        # or None to consume it. We consume Option-modified key-downs (our
+        # hotkeys) so they don't type stray characters into a focused field.
+        def _on_key_down_local(event):
+            try:
+                if _on_key_down(event):
+                    return None  # consume handled ⌥-combos
+            except Exception:
+                pass
+            return event
+
+        def _on_key_up_local(event):
+            try:
+                _on_key_up(event)
+            except Exception:
+                pass
+            return event
+
         # ── Register monitors ────────────────────────────────────────────
+        # Global monitors fire when Aura is NOT focused (need Accessibility
+        # permission); local monitors fire when it IS focused (no permission).
+        # Registering both means hotkeys work in the common focused case even
+        # if the permission hasn't been granted.
         try:
             from AppKit import NSEvent  # already imported at module level; re-bind locally
-            self._key_down_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                _NSKeyDownMask, _on_key_down
+
+            self._key_down_local_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                _NSKeyDownMask, _on_key_down_local
             )
-            self._key_up_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                _NSKeyUpMask, _on_key_up
+            self._key_up_local_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                _NSKeyUpMask | (1 << 12), _on_key_up_local
             )
-            print("✅ Global hotkey listener active (NSEvent)")
+            print("✅ Local hotkey listener active (works when Aura is focused — no permission needed)")
+
+            global_ok = False
+            try:
+                self._key_down_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                    _NSKeyDownMask, _on_key_down
+                )
+                self._key_up_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                    _NSKeyUpMask | (1 << 12), _on_key_up
+                )
+                # A global monitor registers even without permission; it just
+                # never fires. We can't detect that here, so we advise either way.
+                global_ok = self._key_down_monitor is not None
+            except Exception as gexc:
+                print(f"⚠️ Global (unfocused) hotkeys unavailable: {gexc}")
+
+            if global_ok:
+                print("✅ Global hotkey monitor registered (needs Accessibility permission when Aura is unfocused)")
             print("   ⌥Z=hide  ⌥X=ghost  ⌥1-3=opacity  ⌥M=mute  ⌥S=screenshot  ⌥A=analyze")
+            print("   ℹ️ For hotkeys while Aura is NOT focused: grant Accessibility permission to Aura")
+            print("      (System Settings → Privacy & Security → Accessibility) and restart.")
         except Exception as exc:
             print(f"❌ Failed to register NSEvent monitors: {exc}")
             print("   💡 Grant Input Monitoring permission and restart the app.")
-            print("      System Settings → Privacy & Security → Input Monitoring")
+            print("      System Settings → Privacy & Security → Accessibility")
 
     # ------------------------------------------------------------------ #
     # Screen-share indicator stubs (Windows-only feature — not on macOS)  #

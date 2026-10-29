@@ -1,130 +1,151 @@
-# 🤝 Contributing to Aura
+# Contributing to Aura on macOS
 
-First off — **thank you** for wanting to contribute! Every bug report, feature idea, and pull request makes Aura better for everyone.
+This repository's default branch is `macos`. Its window management uses
+Cocoa/AppKit and pywebview's WKWebView backend. Start with the
+[README](README.md) for installation and provider setup, then use
+[DESKTOP-SYNC.md](DESKTOP-SYNC.md) to exercise the shared Chrome session.
+For direct desktop playback capture, see [SYSTEM-AUDIO.md](SYSTEM-AUDIO.md).
 
----
+## Development setup
 
-## 🚀 Quick Start
+Use macOS, Python 3.10+ and Node.js with the built-in `node --test` runner.
+The packaged build was validated with Python 3.12 on Apple Silicon. Install
+runtime dependencies and copy configuration templates as shown in the README.
+Run source commands from the repository root:
 
-```bash
-# 1. Fork & clone
-git clone https://github.com/YOUR_USERNAME/aura.git
-cd aura
-
-# 2. Create a virtual environment
-python -m venv venv
-venv\Scripts\activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Copy config templates
-cp .env.example .env
-cp ai_providers.example.json ai_providers.json
-
-# 5. Add your API keys to .env and ai_providers.json
-
-# 6. Run
-python main.py
+```sh
+.venv/bin/python main.py
 ```
 
----
+Native playback requires macOS 13+ and a helper compiled with Xcode Command
+Line Tools. Build it with `.venv/bin/python native/build_audio.py` before a
+source run; packaging builds it automatically. No compiler is needed by users
+of the packaged app.
 
-## 📋 How to Contribute
+To enable development logging and disable capture protection, set
+`DEV_MODE=true` in the local `.env` and restart. The `.env` setting takes
+precedence over the same setting in the shell environment.
 
-### 🐛 Found a Bug?
+Source configuration lives in the project root; packaged configuration lives
+in `~/Library/Application Support/Aura/`. Never commit `.env`,
+`ai_providers.json`, `profile.json`, `web/js/dev.js`, credentials, resumes or
+captured conversations. Share only redacted logs and example configuration.
 
-1. **Search existing issues** first to avoid duplicates
-2. Open a new issue with:
-   - Clear, descriptive title
-   - Steps to reproduce
-   - Expected vs actual behavior
-   - Terminal/console output (if applicable)
-   - Your OS version and Python version
+## Project structure
 
-### 💡 Have a Feature Idea?
+| Path | Responsibility |
+| --- | --- |
+| `main.py` | FastAPI/backend lifecycle, native window and command monitor |
+| `window_manager.py` | AppKit window appearance, full-screen collection behavior and native Option shortcuts |
+| `api/websocket.py` | Browser session connection and separate desktop display connection |
+| `api/session_manager.py` | Audio/session lifecycle, question processing and command routing |
+| `api/config_api.py` | Setup/configuration, readiness and desktop-control endpoints |
+| `core/shortcuts.py` | Allowed session commands and labels |
+| `core/paths.py` | Source and packaged resource/data paths |
+| `services/desktop_sync.py` | In-memory conversation/state snapshots for desktop viewers |
+| `services/` | AI providers, context, transcription and vision processing |
+| `web/js/audio_handler.js`, `audio_processor.js` | Browser media capture and 48 kHz audio mixing |
+| `web/desktop.html`, `web/js/desktop*.js`, `web/css/desktop.css` | Floating conversation view and controls |
+| `web/js/session-shortcuts.js` | Chrome command execution, deduplication, expiry and acknowledgements |
+| `tests/` | Python integration tests and Node behavior tests |
+| `Aura.spec`, `Aura.entitlements` | macOS app packaging |
+| `native/`, `services/system_audio.py`, `api/system_audio.py` | Native playback helper and bounded local audio transport |
+| `services/screen_capture.py`, `api/screen_capture.py` | Requested native main-display screenshots with temporary-file cleanup |
 
-1. Open an issue with the **`feature request`** label
-2. Describe:
-   - The use case — what problem does it solve?
-   - Your proposed solution
-   - Any alternatives you've considered
+When adding a session control, update the command allowlist, API validation,
+Chrome action map and desktop interface together. Preserve Chrome's ownership
+of capture; the viewer must not replace its audio WebSocket. Keep the shortcut
+table and user-facing labels consistent with the actual Option-key bindings.
 
-### 🔧 Want to Submit a PR?
+## Validation
 
-1. **Fork** the repository
-2. **Create a branch** from `main`:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-3. **Make your changes** — keep commits focused and atomic
-4. **Test** your changes locally. For changes to the web UI's markdown or math rendering, run the JS tests (needs Node 20+):
-   ```bash
-   npm install
-   npm test
-   ```
-5. **Push** and open a Pull Request:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
+Run the relevant checks for your change. The current regression suite has 47
+Python tests and 94 Node tests and does not require real API credentials.
+The compiled-helper PCM test is skipped if the helper has not been built:
 
----
-
-## 📁 Project Structure
-
-```
-aura/
-├── main.py                 # App entry point — FastAPI server + pywebview
-├── window_manager.py       # Stealth mode, hotkeys, Win32 API integration
-├── api/                    # FastAPI route handlers
-├── core/                   # Core business logic and config
-├── services/               # AI providers, Deepgram, vision processing
-├── web/                    # Frontend — HTML/CSS/JS served by pywebview
-├── .env                    # Environment variables (secrets — not committed)
-├── ai_providers.json       # AI provider config (secrets — not committed)
-├── run.bat                 # Automated setup & launch script
-└── silent_run.vbs          # Invisible launch (no terminal window)
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+npm test
+git diff --check
 ```
 
----
+The tests mock AI, transcription, media and native-window boundaries. For
+changes to session sync, capture, window behavior or shortcuts, also check on
+the target Mac:
 
-## 🎯 Areas We Need Help With
+- Chrome sharing with **Share tab audio** selected; spoken browser audio appears
+  in the transcript while Aura's microphone input is muted.
+- Direct desktop capture with Aura's mic muted: spoken app audio transcribes
+  through speakers and headphones, including after changing macOS's output.
+  Check native permission denial/recovery, Pause and End cleanup. Native mode
+  must work without an Aura Chrome tab or DevTools.
+- In direct desktop mode, Option+F enables vision, Option+S queues the main
+  display and Option+A analyses it. Check permission denial/recovery and confirm
+  no screenshot is captured until requested.
+- Desktop entry stays disabled until the browser, shared audio and transcription
+  are connected, and reports the missing prerequisite.
+- The desktop window remains visible above full-screen Chrome and incoming
+  answers do not move keyboard focus. Test the actual Option shortcuts after
+  granting Accessibility permission.
+- Mute/unmute, pause/resume, model selection, vision capture/analysis/clear,
+  typed questions and Reset affect the same browser session.
+- Earlier questions remain in the continuous conversation; scrolling up holds
+  the reading position, and reconnecting restores the full conversation.
+- End session stops Chrome's capture and transcription, disables session
+  controls and keeps the completed conversation visible. Starting another
+  session clears the old conversation.
+- Opacity, click-through, hide/show, movement and scrolling operate on the
+  desktop window. Option+X and Option+Z restore clicking and visibility.
 
-| Area | Description |
-|:-----|:------------|
-| 🐧 **Linux Support** | Port Win32 stealth APIs to X11/Wayland equivalents |
-| 🍎 **macOS Support** | Port Win32 stealth APIs to Cocoa/AppKit |
-| 🌐 **More AI Providers** | Add support for new LLM providers (Anthropic, Mistral, etc.) |
-| 🎨 **UI/UX** | Improve the overlay interface, themes, animations |
-| 📝 **Documentation** | Better setup guides, tutorials, video walkthroughs |
-| 🧪 **Testing** | Unit tests, integration tests, CI/CD pipeline |
-| 🌍 **Localization** | Multi-language support for the UI |
+`npm test` runs both this fork's tests and the upstream Markdown/math tests.
+The current automated suite and bundle checks passed. The real OS/media and
+full-screen checks above remain manual validation items; do not report them as
+passed based only on mocks. Documentation-only changes need link/content checks
+and `git diff --check`, with no app rebuild unless bundled resources change.
 
----
+## Build the macOS app
 
-## 📐 Code Style
+Install PyInstaller and Apple's Xcode Command Line Tools. `Aura.spec` compiles
+the native audio helper using Swift and expects
+`build/Aura.icns`; generate it from the tracked 1024×1024 `logo.png` using macOS
+tools before building from a clean checkout:
 
-- **Python**: Follow PEP 8 conventions
-- **JavaScript**: Use vanilla JS (no frameworks in the frontend)
-- **CSS**: Vanilla CSS — no Tailwind or preprocessors
-- **Naming**: Descriptive variable/function names, snake_case for Python, camelCase for JS
-- **Comments**: Explain *why*, not *what* — code should be self-documenting
+```sh
+.venv/bin/python -m pip install pyinstaller
+mkdir -p build/Aura.iconset
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" logo.png --out "build/Aura.iconset/icon_${size}x${size}.png" >/dev/null
+  double_size=$((size * 2))
+  sips -z "$double_size" "$double_size" logo.png --out "build/Aura.iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns build/Aura.iconset -o build/Aura.icns
+.venv/bin/pyinstaller --noconfirm Aura.spec
+codesign --verify --deep --strict dist/Aura.app
+```
 
----
+The output is `dist/Aura.app`, built for the current machine's architecture and
+ad-hoc signed. This command does not produce a notarized distribution release.
+The bundle includes web resources and example configuration; writable personal
+configuration stays outside it. Check that no local credentials or profile data
+are present before sharing a build. `build/` and `dist/` are ignored by Git.
 
-## ⚠️ Important Notes
+After installing an updated app, fully quit and reopen Aura and hard-refresh its
+Chrome page with Command+Shift+R. Preserve the existing runtime data directory
+when replacing the bundle.
 
-- **Never commit secrets** — `.env` and `ai_providers.json` are in `.gitignore` for a reason
-- **Test stealth features** on Windows 10/11 before submitting stealth-related PRs
-- **Keep PRs focused** — one feature or fix per PR
-- **Be respectful** — we're all here to build something awesome
+## Pull requests and reports
 
----
+1. Create a focused branch from the current `macos` branch (or use a fork when
+   you do not have push access).
+2. Keep Python changes consistent with the surrounding code; use vanilla
+   JavaScript/CSS, snake_case for Python and camelCase for JavaScript.
+3. Add meaningful regression coverage for behavior changes and update the
+   README, setup guide and unreleased changelog where relevant.
+4. Run appropriate checks, push the feature branch and open a PR targeting
+   `macos`. Describe the resulting behavior, configuration/migration steps,
+   checks performed and any manual checks still outstanding.
 
-## 💬 Questions?
-
-Open a GitHub issue or start a Discussion — we're happy to help!
-
----
-
-**⭐ Star the repo if you find Aura useful — it helps more people discover it!**
+For bugs, include reproduction steps, expected/actual behavior, macOS version,
+source versus packaged run, browser version and redacted logs. For feature
+requests, describe the use case and expected interaction. Avoid attaching
+personal profiles, API keys or unredacted transcripts.

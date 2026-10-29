@@ -8,6 +8,12 @@
     --border-color: rgba(255, 255, 255, 0.1);
 }
 
+#audio-source-status { flex-shrink: 0; margin: 0; padding: 4px 14px; color: #a9dfc8; font-size: 11px; }
+#audio-source-status:empty { display: none; }
+#audio-source-status[data-state="error"], #audio-source-status[data-state="warning"] { color: #ffb2b2; }
+.live-shortcuts { display: flex; flex-wrap: wrap; flex-shrink: 0; gap: 1px 8px; padding: 4px 10px; border-top: 1px solid var(--border-color); font-size: 8.5px; line-height: 1.35; color: #a9adc0; }
+.live-shortcuts span { white-space: nowrap; }
+
 .live-interview-container {
     height: 100vh;
     width: 100vw;
@@ -71,15 +77,15 @@
         padding: 0.75rem;
         min-height: auto;
     }
-    
+
     .session-info {
         font-size: 0.9rem;
     }
-    
+
     .header-controls {
         gap: 0.5rem;
     }
-    
+
     .mute-btn, .end-btn {
         padding: 0.4rem 0.8rem;
         font-size: 0.8rem;
@@ -461,7 +467,7 @@
     background: transparent !important;
     color: #e2e8f0;
     border: none;
-    
+
     /* Ensure code wraps correctly and is responsive */
     white-space: pre-wrap;
     overflow-wrap: break-word;
@@ -469,7 +475,7 @@
     max-width: 100%;
     overflow-x: hidden;
     box-sizing: border-box;
-    
+
     /* Better responsive wrapping */
     word-spacing: normal;
     letter-spacing: normal;
@@ -578,20 +584,20 @@
         padding: 0.5rem 1rem;
         font-size: 0.8rem;
     }
-    
+
     .code-header, .code-block-header {
         padding: 0.2rem 0.4rem;
         font-size: 0.6rem;
         min-height: 20px;
         max-height: 20px;
     }
-    
+
     .code-block pre, .code-block-container pre {
         padding: 0.75rem 1rem !important;
         font-size: 0.75rem;
         line-height: 1.4;
     }
-    
+
     .copy-btn, .copy-button {
         height: 14px !important;
         width: 18px !important;
@@ -599,7 +605,7 @@
         max-width: 18px !important;
         font-size: 0.6rem !important;
     }
-    
+
     .language-tag, .code-language {
         font-size: 0.55rem;
     }
@@ -613,7 +619,7 @@
         transform: none;
         max-width: calc(100vw - 2rem);
     }
-    
+
     .end-btn {
         padding: 0.4rem 0.8rem;
         font-size: 0.8rem;
@@ -625,11 +631,11 @@
         min-height: 50px;
         padding: 0.5rem;
     }
-    
+
     .conversation-stream {
         padding: 0.5rem;
     }
-    
+
     .message:last-child {
         margin-bottom: 3rem;
     }
@@ -699,7 +705,7 @@
 }
 
 /* First heading in a message should have less top margin */
-.message h1:first-child, .message h2:first-child, .message h3:first-child, 
+.message h1:first-child, .message h2:first-child, .message h3:first-child,
 .message h4:first-child, .message h5:first-child, .message h6:first-child,
 .streaming-text h1:first-child, .streaming-text h2:first-child, .streaming-text h3:first-child,
 .streaming-text h4:first-child, .streaming-text h5:first-child, .streaming-text h6:first-child {
@@ -758,13 +764,13 @@
         margin-top: 1.5rem !important;
         margin-bottom: 1rem !important;
     }
-    
+
     .message h2, .streaming-text h2 {
         font-size: 1.2rem;
         margin-top: 1.3rem !important;
         margin-bottom: 0.8rem !important;
     }
-    
+
     .message h3, .streaming-text h3 {
         font-size: 1.05rem;
         margin-top: 1.2rem !important;
@@ -778,13 +784,13 @@
         margin-top: 1.2rem !important;
         margin-bottom: 0.8rem !important;
     }
-    
+
     .message h2, .streaming-text h2 {
         font-size: 1.1rem;
         margin-top: 1rem !important;
         margin-bottom: 0.7rem !important;
     }
-    
+
     .message h3, .streaming-text h3 {
         font-size: 1rem;
         margin-top: 1rem !important;
@@ -817,4 +823,34 @@
 .message p + h1, .message p + h2, .message p + h3, .message p + h4, .message p + h5, .message p + h6,
 .streaming-text p + h1, .streaming-text p + h2, .streaming-text p + h3, .streaming-text p + h4, .streaming-text p + h5, .streaming-text p + h6 {
     margin-top: 1.3rem !important;
-} 
+}
+/* ── Manual typed-question bar (live interview) ──────────────── */
+.manual-question-bar {
+    display: flex;
+    gap: 8px;
+    padding: 10px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+.manual-question-bar input {
+    flex: 1;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: rgba(0, 0, 0, 0.25);
+    color: inherit;
+    font-size: 0.9rem;
+    outline: none;
+}
+.manual-question-bar input:focus {
+    border-color: rgba(120, 170, 255, 0.8);
+}
+.manual-question-bar button {
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: none;
+    background: #3b82f6;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+}
+.manual-question-bar button:hover { background: #2f6fe0; }

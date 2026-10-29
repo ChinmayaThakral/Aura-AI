@@ -9,6 +9,8 @@ from .utils import send_json
 from services.llm_service import MultiLLMManager
 from services.stt_service import DeepgramManager
 from services.vision_service import vision_service
+from services.desktop_sync import desktop_sync
+from core.shortcuts import SESSION_SHORTCUTS
 
 # Session TTL: 30 minutes of inactivity with no WebSocket connected
 SESSION_TTL_SECONDS = 30 * 60
@@ -21,6 +23,8 @@ class InterviewSession:
     def __init__(self, session_id: str):
         self.session_id: str = session_id
         self.websocket: Optional[WebSocket] = None
+        self.source: str = "desktop"
+        self.pending_shortcuts: dict = {}
         self.llm_manager: Optional[MultiLLMManager] = None
         self.stt_manager: Optional[DeepgramManager] = None
         self.is_active: bool = False
@@ -39,18 +43,19 @@ class InterviewSession:
 
     async def _send_json(self, type: str, payload: dict):
         """Safely sends a JSON message to the client's websocket."""
+        desktop_sync.publish(self.session_id, type, payload)
         if self.websocket:
             self._touch()
-            await send_json(self.websocket, type, payload)
+            return await send_json(self.websocket, type, payload)
 
     async def handle_verify_deepgram(self, payload: dict):
         """Handles the deepgram verification request from the client."""
-        from services.stt_service import verify_deepgram_api_key
+        from services.stt_service import get_deepgram_key_status
         self._touch()
         print(f"➡️ [BACKEND] Received 'verify_deepgram' for session {self.session_id}")
-        is_valid = await verify_deepgram_api_key()
-        print(f"⬅️ [BACKEND] Sending 'api_key_status' for Deepgram. Valid: {is_valid}")
-        await self._send_json("api_key_status", {"service": "deepgram", "valid": is_valid})
+        status = await get_deepgram_key_status()
+        print(f"⬅️ [BACKEND] Sending 'api_key_status' for Deepgram. Valid: {status['valid']}")
+        await self._send_json("api_key_status", {"service": "deepgram", **status})
 
     async def handle_start_interview(self, payload: dict):
         """Handles the 'start_interview' message."""
@@ -68,6 +73,8 @@ class InterviewSession:
             self.state["is_universally_muted"] = payload.get('is_universally_muted', False)
 
             await self.initialize_managers(primary_provider_config, secondary_provider_config, primary_vision_config, secondary_vision_config, onboarding_context)
+            if self.source == "browser":
+                desktop_sync.start(self.session_id, bool(getattr(self.stt_manager, "is_connected", False)))
             
             current_preset = self.llm_manager.get_current_preset_info()
             health_results = await self.llm_manager.perform_health_checks()
@@ -98,6 +105,39 @@ class InterviewSession:
             self.state["is_muted"] = payload.get('is_muted', False)
             if audio_data:
                 await self.stt_manager.send_audio(audio_data)
+
+    async def handle_client_controls(self, payload: dict):
+        """Report the actual capture and control state of the browser owner."""
+        if self.source == "browser" and self.is_active:
+            await self._send_json("controls_updated", {
+                **payload, "transcription_ready": bool(getattr(self.stt_manager, "is_connected", False))
+            })
+
+    async def handle_shortcut_applied(self, payload: dict):
+        pending = self.pending_shortcuts.pop(payload.get("id"), None)
+        if pending:
+            success = payload.get("success") is True
+            if success and pending.startswith(("Option+Q", "Option+W", "Option+E")):
+                return  # The provider's actual result supplies the model-switch status.
+            message = pending + (" applied in Chrome" if success else ": " + str(payload.get("message", "Could not apply shortcut"))[:200])
+            desktop_sync.notify_shortcut(message, success)
+
+    async def handle_manual_question(self, payload: dict):
+        """Handles a typed question from the client (text input instead of voice).
+
+        Routes the text through the same LLM streaming pipeline used for
+        voice transcripts, so the frontend renders it identically.
+        """
+        self._touch()
+        text = (payload.get("text") or "").strip()
+        if not text:
+            return
+        # Cancel any pending silence-triggered processing so a typed question
+        # doesn't race with buffered voice input.
+        if self.silence_timer and not self.silence_timer.done():
+            self.silence_timer.cancel()
+        self.transcript_buffer = text
+        await self._process_aggregated_transcript()
 
     async def handle_config_update(self, payload: dict):
         """Handles configuration updates from the client."""
@@ -281,6 +321,7 @@ class InterviewSession:
 
     async def cleanup(self):
         """Cleans up resources for the session."""
+        desktop_sync.stop(self.session_id)
         if self.stt_manager:
             await self.stt_manager.finish()
         if self.silence_timer and not self.silence_timer.done():
@@ -305,6 +346,43 @@ class SessionManager:
         self.active_sessions[session_id] = session
         print(f"Created new session: {session_id} (total active: {len(self.active_sessions)})")
         return session
+
+    async def route_shortcut(self, command_data: dict) -> bool:
+        """Deliver a native control to the same session that owns Chrome audio."""
+        command = command_data.get("command")
+        if command not in SESSION_SHORTCUTS:
+            return False
+        state = desktop_sync.snapshot()
+        expected_session = command_data.get("session_id")
+        if expected_session and expected_session != state["session_id"]:
+            return False
+        session = self.active_sessions.get(state["session_id"])
+        if not session or not session.is_active or not state["connected"] or not session.websocket:
+            desktop_sync.notify_shortcut("Chrome session is not connected. Start or reconnect it first.", False)
+            return False
+        preset = command_data.get("preset_key", "primary")
+        if command == "switch_preset" and preset not in {"primary", "secondary", "auto"}:
+            return False
+        text = str(command_data.get("text", "")).strip()[:20000]
+        if command == "manual_question" and not text:
+            return False
+        command_id = uuid.uuid4().hex
+        label = SESSION_SHORTCUTS[command]
+        if command == "switch_preset":
+            label = {"primary": "Option+Q", "secondary": "Option+W", "auto": "Option+E"}[preset] + " — AI model"
+        session.pending_shortcuts[command_id] = label
+        if len(session.pending_shortcuts) > 100:
+            session.pending_shortcuts.pop(next(iter(session.pending_shortcuts)))
+        desktop_sync.notify_shortcut(label + " sent to Chrome…")
+        success = await send_json(session.websocket, "session_shortcut", {
+            "id": command_id, "command": command, "preset_key": preset,
+            **({"text": text} if command == "manual_question" else {}),
+            "expires_at": int((time.time() + 10) * 1000)
+        })
+        if not success:
+            session.pending_shortcuts.pop(command_id, None)
+            desktop_sync.notify_shortcut("Could not reach Chrome. Reconnect Aura’s Chrome tab.", False)
+        return success
 
     def get_session(self, session_id: str) -> Optional[InterviewSession]:
         """Retrieves an existing session by its ID."""

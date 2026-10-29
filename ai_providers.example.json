@@ -1,5 +1,24 @@
 [
     {
+        "name": "Quotio",
+        "baseURL": "http://127.0.0.1:8317/v1",
+        "apiKey": "YOUR_QUOTIO_PROXY_API_KEY",
+        "models": [
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna"
+        ],
+        "visionModels": [
+            "gpt-6.1-sol",
+            "gpt-6-sol"
+        ],
+        "supportsVision": true,
+        "defaultPrimary": true,
+        "defaultVisionPrimary": true,
+        "defaultModel": "gpt-6.1-sol",
+        "defaultVisionModel": "gpt-6.1-sol"
+    },
+    {
         "name": "Cerebras",
         "baseURL": "https://api.cerebras.ai/v1",
         "apiKey": "YOUR_CEREBRAS_API_KEY_HERE",
@@ -24,11 +43,11 @@
             }
         ],
         "supportsVision": true,
-        "defaultPrimary": true,
+        "defaultPrimary": false,
         "defaultModel": "gpt-oss-120b",
         "defaultVisionModel": "gemma-4-31b",
         "maxImages": 2,
-        "defaultVisionSecondary": true
+        "defaultVisionSecondary": false
     },
     {
         "name": "Groq",
@@ -59,7 +78,7 @@
             }
         ],
         "supportsVision": true,
-        "defaultSecondary": true,
+        "defaultSecondary": false,
         "defaultModel": "openai/gpt-oss-120b",
         "defaultVisionModel": "qwen/qwen3.6-27b",
         "maxImages": 2
@@ -120,7 +139,7 @@
         "defaultModel": "gemini-3.5-flash-lite",
         "defaultVisionModel": "gemini-3.5-flash-lite",
         "maxImages": 4,
-        "defaultVisionPrimary": true
+        "defaultVisionPrimary": false
     },
     {
         "name": "OpenRouter",

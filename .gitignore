@@ -16,6 +16,15 @@ node_modules/
 # --- Build artifacts ---
 dist/
 build/
+# Keep the packaging config under version control
 *.spec
+!Aura.spec
 # AI Provider configuration file with secret keys
 ai_providers.json
+
+# Personal default interview profile (resume / JD)
+web/js/dev.js
+profile.json
+
+# macOS metadata
+.DS_Store

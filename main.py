@@ -32,8 +32,19 @@ import time
 import sys
 import socket
 import threading
+import queue
 import shutil
 from pathlib import Path
+
+# --- Bundle bootstrap (must run BEFORE importing core.config / api) ---------
+# In a packaged .app the working directory is "/", and .env / ai_providers.json
+# live in a writable data dir instead of the read-only bundle. Seed those files
+# and chdir there so the existing relative-path reads keep working unchanged.
+from core.paths import is_frozen, ensure_runtime_files, data_dir  # noqa: E402
+if is_frozen():
+    ensure_runtime_files()
+    os.chdir(data_dir())
+# ---------------------------------------------------------------------------
 
 
 # --- Auto-create .env from .env.example if missing ---
@@ -46,14 +57,22 @@ if not _env_path.exists() and _env_example_path.exists():
 elif not _env_path.exists() and not _env_example_path.exists():
     print("⚠️ No .env or .env.example found. The app may fail to start without a .env file.")
 
-from api import websocket, config_api
+from api import websocket, config_api, system_audio, screen_capture
 from api.session_manager import session_manager
 from core.config import settings, print_config_debug
+from core.shortcuts import SESSION_SHORTCUTS
+from services.desktop_sync import desktop_sync
 
 
 def find_free_port(preferred: int = 8002) -> int:
-    """Check if the preferred port is available; if not, find a free one."""
+    """Check if the preferred port is available; if not, find a free one.
+
+    The probe sets SO_REUSEADDR to match how uvicorn binds, so a lingering
+    TIME_WAIT socket from a recent run doesn't make us needlessly fall back to
+    a random port. Frontend connections use whichever local port is selected.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", preferred))
             return preferred
@@ -85,6 +104,10 @@ class GlobalCommandMonitor:
         self.last_processed_command = None
         self.command_cooldown = 0.5
         self._monitor_task = None
+        self.pending_commands = queue.SimpleQueue()
+
+    def enqueue(self, command_data):
+        self.pending_commands.put({**command_data, "source": "global_hotkey"})
 
     async def start_monitoring(self):
         """Delete any stale command file and launch the async polling loop."""
@@ -113,6 +136,8 @@ class GlobalCommandMonitor:
         """Poll the command file every 200 ms and dispatch recognised commands."""
         while self.running:
             try:
+                while not self.pending_commands.empty():
+                    await self._process_command(self.pending_commands.get_nowait())
                 if os.path.exists(self.command_file):
                     file_mtime = os.path.getmtime(self.command_file)
                     if file_mtime > self.last_command_time:
@@ -120,21 +145,21 @@ class GlobalCommandMonitor:
                         try:
                             async with aiofiles.open(self.command_file, "rb") as f:
                                 command_data = orjson.loads(await f.read())
-                            if self._process_command(command_data):
+                            if await self._process_command(command_data):
                                 try:
                                     os.remove(self.command_file)
                                 except Exception:
                                     pass
                         except (orjson.JSONDecodeError, IOError):
                             pass
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 print(f"❌ Error in command monitor: {exc}")
                 await asyncio.sleep(1)
 
-    def _process_command(self, command_data: dict) -> bool:
+    async def _process_command(self, command_data: dict) -> bool:
         """Validate and dispatch a single command dict; return True on success."""
         command = command_data.get("command", "")
         source = command_data.get("source", "")
@@ -147,7 +172,7 @@ class GlobalCommandMonitor:
             return False
 
         command_id = (
-            f"{command}_{command_data.get('level','')}_{command_data.get('preset_key','')}_{command_data.get('direction','')}"
+            f"{command}_{command_data.get('level','')}_{command_data.get('preset_key','')}_{command_data.get('direction','')}_{command_data.get('event_id','')}"
         )
         current_time = time.time()
         if (
@@ -162,6 +187,11 @@ class GlobalCommandMonitor:
         print(f"🎮 Processing global command: {command}")
 
         try:
+            if command in SESSION_SHORTCUTS and (
+                desktop_sync.snapshot()["active"] or window_manager.window_manager.is_desktop_display
+            ):
+                await session_manager.route_shortcut(command_data)
+                return True
             if command == "toggle_vision_mode":
                 self._js('if(window.toggleVisionMode)window.toggleVisionMode()')
             elif command == "capture_screenshot":
@@ -232,18 +262,22 @@ class GlobalCommandMonitor:
 
 
 command_monitor = GlobalCommandMonitor()
+window_manager.window_manager.command_callback = command_monitor.enqueue
 
 # --- FastAPI App ---
 app = FastAPI()
 app.include_router(websocket.router)
 app.include_router(config_api.router)
-app.mount("/static", StaticFiles(directory="web"), name="static")
+app.include_router(system_audio.router)
+app.include_router(screen_capture.router)
+from core.paths import resource_path  # web/ is a read-only bundled resource
+app.mount("/static", StaticFiles(directory=resource_path("web")), name="static")
 
 
 @app.get("/")
 async def read_index(request: Request):
     """Serve the main SPA entry point (web/index.html)."""
-    return FileResponse(os.path.join("web", "index.html"))
+    return FileResponse(resource_path("web", "index.html"))
 
 
 # --- Uvicorn server wrapper ---
@@ -437,6 +471,47 @@ def setup_webview_window():
                     webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_,
                     selector=b"webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:",
                     signature=b"v@:@@@q@?",
+                )
+
+                def webView_runOpenPanelWithParameters_initiatedByFrame_completionHandler_(
+                    self, webview, parameters, frame, handler
+                ):
+                    """Present a native Open panel for <input type=file>.
+
+                    WKWebView does nothing on a file input unless the UIDelegate
+                    implements this; browsers provide it automatically, WKWebView
+                    does not. Restricted to PDFs for the onboarding uploads.
+                    """
+                    try:
+                        from AppKit import NSOpenPanel
+                        panel = NSOpenPanel.openPanel()
+                        panel.setCanChooseFiles_(True)
+                        panel.setCanChooseDirectories_(False)
+                        try:
+                            panel.setAllowsMultipleSelection_(
+                                bool(parameters.allowsMultipleSelection())
+                            )
+                        except Exception:
+                            panel.setAllowsMultipleSelection_(False)
+                        try:
+                            panel.setAllowedFileTypes_(["pdf"])
+                        except Exception:
+                            pass
+                        if panel.runModal() == 1:  # NSModalResponseOK
+                            handler(panel.URLs())
+                        else:
+                            handler(None)
+                    except Exception as exc:
+                        print(f"ℹ️ Open panel failed: {exc}")
+                        try:
+                            handler(None)
+                        except Exception:
+                            pass
+
+                webView_runOpenPanelWithParameters_initiatedByFrame_completionHandler_ = objc.selector(
+                    webView_runOpenPanelWithParameters_initiatedByFrame_completionHandler_,
+                    selector=b"webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:",
+                    signature=b"v@:@@@@?",
                 )
 
             def _find_wkwebview(view):

@@ -1,5 +1,6 @@
 // Screenshot Service for Vision AI Processing
 // Handles screen capture, queue management, and vision model integration
+import { captureNativeScreen } from './native-screen-capture.js';
 
 // Longest edge a capture is allowed to keep, in pixels. Chosen so that 1080p
 // and 1440p displays are never touched and only larger or multi-monitor
@@ -329,7 +330,7 @@ class ScreenshotService {
      * @param {number} [maxImages] Images this vision model accepts in one
      *   request. Providers differ: Cerebras gemma-4-31b rejects a third image
      *   with HTTP 413, while Gemini handles four. Without this the queue would
-     *   happily fill to 4 and then fail the whole batch at Alt+P.
+     *   happily fill to 4 and then fail the whole batch at Option+A.
      */
     setVisionConfig(visionProvider, visionModel, maxImages) {
         this.visionConfig = {
@@ -337,11 +338,11 @@ class ScreenshotService {
             model: visionModel
         };
 
-        const cap = Number(maxImages) > 0 ? Math.floor(Number(maxImages)) : DEFAULT_MAX_SCREENSHOTS;
+        const cap = Number(maxImages) >= 1 ? Math.min(DEFAULT_MAX_SCREENSHOTS, Math.floor(Number(maxImages))) : DEFAULT_MAX_SCREENSHOTS;
         if (cap !== this.maxScreenshots) {
             this.maxScreenshots = cap;
             console.log(`🔧 Screenshot queue cap set to ${cap} for ${visionProvider} ${visionModel}`);
-            // Drop anything already queued beyond the new cap so Alt+P cannot
+            // Drop anything already queued beyond the new cap so Option+A cannot
             // send a batch this model will reject.
             if (this.screenshotQueue.length > cap) {
                 const dropped = this.screenshotQueue.length - cap;
@@ -375,6 +376,12 @@ class ScreenshotService {
         this.isCapturing = true;
         
         try {
+            if (window.pywebview) {
+                const {blob, dataUrl} = await captureNativeScreen();
+                this.addToQueue({id: Date.now(), blob, dataUrl, timestamp: new Date(), size: blob.size});
+                this.showNotification('📸 Screenshot Captured', `Main display queued (${this.screenshotQueue.length}/${this.maxScreenshots}) — Option+A to analyse`, 'success');
+                return true;
+            }
             // Try to use existing screen video track first
             let videoTrack = null;
             
@@ -472,7 +479,7 @@ class ScreenshotService {
             };
             
             this.addToQueue(screenshot);
-            this.showNotification('📸 Screenshot Captured (Global)', `Added to queue (${this.screenshotQueue.length}/${this.maxScreenshots}) - Alt+P to process`, 'success');
+            this.showNotification('📸 Screenshot Captured (Global)', `Added to queue (${this.screenshotQueue.length}/${this.maxScreenshots}) - Option+A to process`, 'success');
             
             return true;
             
@@ -566,12 +573,12 @@ class ScreenshotService {
     async processQueue() {
         if (this.screenshotQueue.length === 0) {
             this.showNotification('❌ No Screenshots', 'Take some screenshots first', 'error');
-            return;
+            return false;
         }
         
         if (!this.visionConfig) {
             this.showNotification('❌ No Vision Model', 'Configure a vision model in settings', 'error');
-            return;
+            return false;
         }
         
         const processBtn = document.getElementById('process-queue-btn');
@@ -598,13 +605,16 @@ class ScreenshotService {
                 this.clearQueue();
                 this.showNotification('✅ Comprehensive Analysis Complete', 
                     `${screenshots.length} screenshots analyzed with 2 solution approaches`, 'success');
+                return true;
             } else {
                 this.showNotification('❌ Analysis Failed', result.error || 'Vision AI processing failed', 'error');
+                return false;
             }
             
         } catch (error) {
             console.error('❌ Vision processing error:', error);
             this.showNotification('❌ Processing Error', error.message, 'error');
+            return false;
         } finally {
             if (processBtn) {
                 processBtn.disabled = false;
@@ -700,19 +710,19 @@ class ScreenshotService {
                 <p>Ready to capture and analyze screenshots anywhere!</p>
                 <div class="vision-hotkeys">
                     <div class="vision-hotkey">
-                        <kbd>Alt+S</kbd>
+                        <kbd>Option+S</kbd>
                         <span>Capture</span>
                     </div>
                     <div class="vision-hotkey">
-                        <kbd>Alt+P</kbd>
+                        <kbd>Option+A</kbd>
                         <span>Process</span>
                     </div>
                     <div class="vision-hotkey">
-                        <kbd>Alt+T</kbd>
+                        <kbd>Option+V</kbd>
                         <span>Switch Model</span>
                     </div>
                     <div class="vision-hotkey">
-                        <kbd>Alt+V</kbd>
+                        <kbd>Option+F</kbd>
                         <span>Exit Vision</span>
                     </div>
                 </div>
@@ -781,4 +791,4 @@ const screenshotService = new ScreenshotService();
 // Make it globally accessible
 window.screenshotService = screenshotService;
 
-export default screenshotService; 
+export default screenshotService;

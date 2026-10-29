@@ -1,0 +1,50 @@
+:root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { height: 100vh; display: flex; flex-direction: column; overflow: hidden; margin: 0; background: #10121b; color: #f0f1f6; font-size: 15px; line-height: 1.5; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid #303343; }
+header strong { letter-spacing: .08em; font-size: 13px; }
+header strong span { color: #aeb4cb; font-size: 11px; font-weight: 400; letter-spacing: normal; margin-left: 6px; }
+a { color: #b6b4ff; font-size: 12px; }
+header, nav, .transcript-section, aside, footer, #sync-status, #control-state, #shortcut-status, #sync-error { flex-shrink: 0; }
+#sync-status { margin: 0; padding: 5px 14px; color: #f8cb8f; background: #1b1e2c; font-size: 12px; }
+#sync-status[data-connected="true"] { color: #8ee3bf; }
+#control-state, #shortcut-status, #click-through-status { margin: 0; padding: 3px 14px; font-size: 10px; color: #acb3cb; flex-shrink: 0; }
+#click-through-status[data-enabled="true"] { color: #8ee3bf; }
+#shortcut-status { overflow-wrap: anywhere; }
+#shortcut-status:empty { display: none; }
+#shortcut-status[data-success="false"], #sync-error, #local-control-status { color: #ffb2b2; }
+#sync-error { margin: 6px 14px; font-size: 12px; }
+.session-controls { padding: 6px 10px; border-bottom: 1px solid #303343; }
+.control-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.secondary-controls { margin-top: 5px; }
+button, select { min-height: 27px; border: 1px solid #3b4055; border-radius: 5px; padding: 4px 7px; background: #202437; color: #f0f1f6; font: inherit; font-size: 11px; cursor: pointer; }
+button:hover:not(:disabled), select:hover:not(:disabled) { background: #303652; }
+button:focus-visible, select:focus-visible, summary:focus-visible, main:focus-visible { outline: 2px solid #a6a0ff; outline-offset: 2px; }
+button:disabled, select:disabled { opacity: .4; cursor: default; }
+button[aria-pressed="true"] { border-color: #a6a0ff; background: #34304d; }
+.end-session { margin-left: auto; border-color: #8b4853; color: #ffc0c5; }
+.appearance-controls { margin-top: 4px; font-size: 10px; }
+.appearance-controls summary { width: fit-content; color: #b6b4ff; cursor: pointer; }
+.appearance-controls .control-row { margin-top: 5px; }
+#local-control-status { margin: 4px 0 0; font-size: 11px; }
+#local-control-status:empty { display: none; }
+.transcript-section { padding: 6px 14px; border-bottom: 1px solid #303343; }
+.transcript-section > span { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: #acb3cb; }
+#transcript { margin: 2px 0 0; font-size: 12px; color: #c7ccdc; max-height: 36px; overflow: hidden; }
+main { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 4px 14px 16px; overflow-anchor: none; }
+.conversation-turn { padding: 14px 0; border-bottom: 1px solid #303343; }
+.conversation-turn h2 { font-size: 13px; margin: 0 0 9px; color: #bab9ff; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.turn-answer { overflow-wrap: anywhere; }
+.turn-answer p { white-space: pre-wrap; margin: 0 0 10px; }
+pre { background: #080a10; border: 1px solid #303343; border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 12px; line-height: 1.5; }
+pre code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+.answer-progress { color: #8ee3bf; font-size: 11px; }
+.answer-progress:empty { display: none; }
+.question-bar { display: flex; flex-shrink: 0; gap: 5px; padding: 5px 10px; border-top: 1px solid #303343; }
+.question-bar input { flex: 1; min-width: 0; border: 1px solid #3b4055; border-radius: 5px; padding: 4px 7px; background: #171a29; color: #f0f1f6; font: inherit; font-size: 11px; }
+.question-bar input:focus-visible { outline: 2px solid #a6a0ff; }
+aside { margin: 4px 14px 8px; color: #acb3cb; font-size: 11px; }
+.shortcut-strip { display: flex; flex-wrap: wrap; gap: 1px 8px; padding: 4px 10px; border-top: 1px solid #303343; background: #141722; color: #9ba4bf; font-size: 8.5px; line-height: 1.35; }
+.shortcut-strip span { white-space: nowrap; }
+.shortcut-key, .shortcut-strip kbd { color: #cecaff; font: inherit; font-weight: 600; }

@@ -325,10 +325,10 @@ class LiveInterviewUI {
         let indicatorText = text;
         
         if (status.universal) {
-            indicatorText = '⏸️ System Paused - Press Alt+U to resume';
+            indicatorText = '⏸️ System Paused - Press Option+U to resume';
             this.activityIndicator.classList.add('paused');
         } else if (status.microphone) {
-            indicatorText = '🔇 Microphone Muted - Press Alt+M to unmute';
+            indicatorText = '🔇 Microphone Muted - Press Option+M to unmute';
             this.activityIndicator.classList.remove('paused');
         } else {
             this.activityIndicator.classList.remove('paused');
@@ -1277,10 +1277,10 @@ class LiveInterviewUI {
         if (this.muteButton) {
             if (isMuted) {
                 this.muteButton.classList.add('muted');
-                this.muteButton.title = 'Unmute microphone input to app (Alt+M)';
+                this.muteButton.title = 'Unmute microphone input to app (Option+M)';
             } else {
                 this.muteButton.classList.remove('muted');
-                this.muteButton.title = 'Mute microphone input to app (Alt+M)';
+                this.muteButton.title = 'Mute microphone input to app (Option+M)';
             }
         }
     }
@@ -1359,7 +1359,7 @@ class LiveInterviewUI {
         let targetMode;
         
         if (typeof level === 'number') {
-            // Numeric levels from original hotkey system (Alt+1, Alt+2, Alt+3)
+            // Numeric levels from original hotkey system (Option+1, Option+2, Option+3)
             switch(level) {
                 case 1:
                     targetMode = 'transparent';

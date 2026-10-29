@@ -7,10 +7,12 @@ import {
     startAudioProcessing,
     stopAudioProcessing,
     getScreenVideoTrack,
-    isScreenSharingAvailable
+    isScreenSharingAvailable,
+    isSystemAudioLive
 } from './audio_handler.js';
 import muteManager from './mute-manager.js';
-import { autofillForTesting } from './dev.js';
+// Personal defaults are optional and never required by a fresh checkout.
+const { autofillForTesting } = await import('./dev.js').catch(() => import('./dev.example.js'));
 import { loadConfig, isDev, devLog, devWarn, devError, applyConsoleGate } from './config.js';
 import liveInterviewUI from './live-interview.js';
 import hotkeyManager from './hotkeys.js';
@@ -18,6 +20,8 @@ import presetManager from './preset-manager.js';
 import screenshotService from './screenshot-service.js';
 import { ConfigManager } from './config-manager.js';
 import { testStreamingMarkdown, testSampleMarkdown } from './streaming-markdown-demo.js';
+import { onDomReady, loadDefaultProfile, setupDesktopSyncLink } from './onboarding.js';
+import { createSessionShortcutHandler } from './session-shortcuts.js';
 
 // Initialize managers
 const stateManager = new StateManager();
@@ -45,6 +49,14 @@ const micSelect = document.getElementById('mic-select');
 const proceedButton = document.getElementById('proceed-to-checks');
 const startButton = document.getElementById('start-interview-button');
 const backButton = document.getElementById('back-to-onboarding-btn');
+let sessionStartVersion = 0;
+window.addEventListener('aura-audio-status', event => {
+    const status = document.getElementById('audio-source-status');
+    if (status) {
+        status.textContent = event.detail.message;
+        status.dataset.state = event.detail.state;
+    }
+});
 
 // --- Tab Management ---
 function setupTabs() {
@@ -99,6 +111,21 @@ function handleOnboarding() {
 }
 
 async function runPreFlightChecks() {
+    const captureInfo = document.getElementById('system-capture-info');
+    if (captureInfo) {
+        captureInfo.textContent = window.pywebview
+            ? 'Desktop sessions capture Mac playback directly. Allow Aura’s macOS capture permission when you start; no Chrome Aura tab is needed.'
+            : 'Browser sessions require sharing the tab containing the audio with Share tab audio enabled.';
+        if (window.pywebview) {
+            try {
+                const response = await fetch('/api/audio/system/status');
+                const status = await response.json();
+                captureInfo.textContent = status.message;
+            } catch {
+                captureInfo.textContent = 'Could not check Mac playback capture. Keep Aura running and retry setup.';
+            }
+        }
+    }
     // --- 1. Microphone Check ---
     // First, ensure we have microphone permissions as this is a prerequisite.
     const micPermissionCheck = document.getElementById('check-mic-permission');
@@ -106,13 +133,17 @@ async function runPreFlightChecks() {
 
     providerManager.webSocketHandler.updateCheckStatus(micPermissionCheck, 'pending', 'Requesting Microphone...');
     const micPermission = await setupMicrophone();
+    window.__auraTextOnly = !micPermission && !window.pywebview;
     if (micPermission) {
         providerManager.webSocketHandler.updateCheckStatus(micPermissionCheck, 'success', 'Microphone Permission OK');
         providerManager.webSocketHandler.updateCheckStatus(micSelectionCheck, 'success', 'Microphone Selection Ready');
     } else {
-        providerManager.webSocketHandler.updateCheckStatus(micPermissionCheck, 'error', 'Microphone Permission Denied');
-        providerManager.webSocketHandler.updateCheckStatus(micSelectionCheck, 'error', 'Microphone Selection Failed');
-        return;
+        // On non-bundled macOS builds WKWebView often can't obtain mic access
+        // (no OS prompt is possible). Fall back to a text-only interview using
+        // the typed-question bar instead of blocking Start.
+        providerManager.webSocketHandler.updateCheckStatus(micPermissionCheck, 'success', window.pywebview ? 'Microphone unavailable — Mac playback remains available' : 'Text-only mode (mic unavailable)');
+        providerManager.webSocketHandler.updateCheckStatus(micSelectionCheck, 'success', window.pywebview ? 'System audio will be captured without microphone input' : 'Type your questions instead of speaking');
+        // Do NOT return — let the remaining checks run so Start can enable.
     }
 
     // --- 2. Backend Connection and Session Establishment (NEW ASYNC FLOW) ---
@@ -143,27 +174,56 @@ async function runPreFlightChecks() {
 // This function is now handled by WebSocketHandler
 
 async function startInterview() {
+    const version = ++sessionStartVersion;
     switchView('live');
     liveInterviewUI.init();
     liveInterviewUI.initialize();
     hotkeyManager.setEnabled(true);
 
-    const onAudioData = (audioData, speakerHint) => {
-        webSocketHandler.sendAudioChunk(audioData, muteManager.isMicrophoneMuted());
-    };
+    if (!window.__auraTextOnly || window.pywebview) {
+        const onAudioData = (audioData, speakerHint) => {
+            webSocketHandler.sendAudioChunk(audioData, muteManager.isMicrophoneMuted());
+        };
 
-    const processingStarted = await startAudioProcessing(micSelect.value, onAudioData);
+        const processingStarted = await startAudioProcessing(micSelect.value, onAudioData);
+        if (version !== sessionStartVersion) return;
+        window.__auraTextOnly = !processingStarted;
 
-    if (!processingStarted) {
-        alert("Could not start audio streams. Please check permissions and try again.");
-        switchView('preflight');
-        return;
+        if (!processingStarted) {
+            // Audio failed at start — drop to text-only rather than bouncing back.
+            devWarn('Audio processing unavailable — continuing in text-only mode.');
+            window.__auraTextOnly = true;
+        }
+    }
+
+    if (window.__auraTextOnly) {
+        // Make the text-only mode obvious in the live view.
+        const activity = document.getElementById('activity-indicator');
+        if (activity) {
+            const label = activity.querySelector('span');
+            if (label) label.textContent = 'Text-only mode — type your question below';
+        }
     }
 
     webSocketHandler.startInterview();
+    reportClientControls();
+}
+
+function reportClientControls() {
+    if (!stateManager.isLiveInterviewActive()) return;
+    const mute = muteManager.getMuteStatus();
+    webSocketHandler.sendMessage('client_controls', {
+        mic_muted: mute.microphone, paused: mute.universal,
+        vision_active: stateManager.getState().visionMode.isActive,
+        queue_count: screenshotService.screenshotQueue.length,
+        queue_limit: screenshotService.maxScreenshots,
+        vision_model: screenshotService.visionConfig?.model || '',
+        tab_audio_live: isSystemAudioLive()
+    });
 }
 
 async function endInterview() {
+    sessionStartVersion++;
     console.log('🔚 Ending interview and clearing state...');
 
     // Stop all audio processing
@@ -273,20 +333,96 @@ function setupEventListeners() {
     secondaryProviderSelect?.addEventListener('change', providerManager.updateSecondaryModelDropdown.bind(providerManager));
     visionProviderSelect?.addEventListener('change', providerManager.updateVisionModelDropdown.bind(providerManager));
     visionSecondaryProviderSelect?.addEventListener('change', providerManager.updateSecondaryVisionModelDropdown.bind(providerManager));
+
+    setupManualQuestion();
+    setupPdfUploads();
 }
 
-// Main initialization
-window.addEventListener('DOMContentLoaded', async () => {
-    await loadConfig();
-    applyConsoleGate(); // Suppress console.log/debug/info when DEV_MODE is off
-    await providerManager.loadAiProviders();
-    liveInterviewUI.init();
+// Typed-question input (alternative to voice) shown during the live interview.
+function setupManualQuestion() {
+    const form = document.getElementById('manual-question-form');
+    const input = document.getElementById('manual-question-input');
+    if (!form || !input) return;
+
+    form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (submitManualQuestion(input.value)) input.value = '';
+    });
+}
+
+function submitManualQuestion(value) {
+    const text = String(value || '').trim();
+    if (!text || !stateManager.isLiveInterviewActive()) return false;
+    liveInterviewUI.addInterviewerQuestion(text, false);
+    webSocketHandler.sendManualQuestion(text);
+    return true;
+}
+
+// Onboarding PDF upload slots — extract text server-side and append to the
+// target textarea (background/resume) under a labeled header.
+function setupPdfUploads() {
+    const inputs = document.querySelectorAll('input[type="file"][data-pdf-target]');
+    inputs.forEach((input) => {
+        input.addEventListener('change', async () => {
+            const file = input.files && input.files[0];
+            const statusEl = input.parentElement?.querySelector('[data-pdf-status]');
+            if (!file) return;
+
+            const label = input.getAttribute('data-pdf-label') || 'DOCUMENT';
+            const targetId = input.getAttribute('data-pdf-target') === 'objectives'
+                ? 'user-objectives' : 'user-resume';
+            const target = document.getElementById(targetId);
+            if (statusEl) statusEl.textContent = 'Extracting…';
+
+            try {
+                const fd = new FormData();
+                fd.append('file', file);
+                const res = await fetch('/api/extract-pdf', { method: 'POST', body: fd });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    throw new Error(data.detail || `HTTP ${res.status}`);
+                }
+                const header = `\n\n=== ${label} (from PDF: ${data.filename}) ===\n`;
+                if (target) target.value = (target.value || '').trimEnd() + header + data.text;
+                if (statusEl) statusEl.textContent = `✅ ${data.chars.toLocaleString()} chars added`;
+            } catch (err) {
+                if (statusEl) statusEl.textContent = `❌ ${String(err.message || err).slice(0, 80)}`;
+                devError('PDF extract failed:', err);
+            }
+        });
+    });
+}
+
+// Optional profile imports can finish after DOMContentLoaded has already fired.
+onDomReady(async () => {
     setupEventListeners();
-    setupDeveloperShortcuts();
-    setupPresetHotkeys();
     setupTabs();
-    hotkeyManager.setEnabled(false);
-    switchView('onboarding');
+    setupDesktopSyncLink();
+    const label = proceedButton?.textContent;
+    if (proceedButton) {
+        proceedButton.disabled = true;
+        proceedButton.textContent = 'Loading Aura…';
+    }
+    try {
+        await loadConfig();
+        applyConsoleGate();
+        await providerManager.loadAiProviders();
+        liveInterviewUI.init();
+        setupDeveloperShortcuts();
+        setupPresetHotkeys();
+        hotkeyManager.setEnabled(false);
+        switchView('onboarding');
+        await autofillForTesting();
+        await loadDefaultProfile();
+    } catch (error) {
+        console.error('Aura initialization failed:', error);
+        stateManager.showOnboardingError('Aura could not finish loading. Please close and reopen the app.');
+    } finally {
+        if (proceedButton) {
+            proceedButton.disabled = false;
+            proceedButton.textContent = label;
+        }
+    }
 });
 
 // --- Developer Shortcuts ---
@@ -335,50 +471,25 @@ Try: testSampleMarkdown()
 }
 
 function setupPresetHotkeys() {
-    devLog('🎹 Setting up preset switching and vision hotkeys');
-    document.addEventListener('keydown', (e) => {
-        // Only work during live interview and if not focusing on input fields
-        if (!e.target.matches('input, textarea, select') && stateManager.isLiveInterviewActive()) {
-            if (e.altKey && !e.ctrlKey && !e.shiftKey) {
-                switch (e.key.toLowerCase()) {
-                    case 'q':
-                        e.preventDefault();
-                        switchPreset('primary');
-                        devLog('🔄 Hotkey: Switching to primary preset');
-                        break;
-                    case 'w':
-                        e.preventDefault();
-                        switchPreset('secondary');
-                        devLog('🔄 Hotkey: Switching to secondary preset');
-                        break;
-                    case 'e':
-                        e.preventDefault();
-                        switchPreset('auto');
-                        devLog('🔄 Hotkey: Auto-selecting best preset');
-                        break;
-                    case 't':
-                        e.preventDefault();
-                        switchVisionModel();
-                        devLog('🔄 Hotkey: Switching vision model');
-                        break;
-                    case 'v':
-                        e.preventDefault();
-                        toggleVisionMode();
-                        devLog('👁️ Hotkey: Toggling vision mode');
-                        break;
-                    case 's':
-                        e.preventDefault();
-                        captureScreenshot();
-                        devLog('📸 Hotkey: Capturing screenshot');
-                        break;
-                    case 'p':
-                        e.preventDefault();
-                        processScreenshots();
-                        devLog('🔄 Hotkey: Processing screenshots');
-                        break;
-                }
-            }
-        }
+    const commands = {
+        KeyQ: ['switch_preset', 'primary'], KeyW: ['switch_preset', 'secondary'],
+        KeyE: ['switch_preset', 'auto'], KeyF: ['toggle_vision_mode'],
+        KeyV: ['switch_vision_model'], KeyS: ['capture_screenshot'],
+        KeyA: ['process_screenshots'], KeyD: ['reset_screenshot_queue'],
+        KeyM: ['toggle_mic_mute'], KeyU: ['toggle_universal_mute'], KeyR: ['reset_interview']
+    };
+    document.addEventListener('keydown', e => {
+        if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.repeat
+            || e.target.matches('input, textarea, select') || !stateManager.isLiveInterviewActive()) return;
+        const binding = commands[e.code];
+        if (!binding) return;
+        e.preventDefault();
+        // The native monitor already sends this key to Chrome when permission is present.
+        if (window.__auraNativeShortcuts) return;
+        window.runSessionShortcut?.({
+            id: `local-${Date.now()}-${e.code}`, command: binding[0], preset_key: binding[1],
+            expires_at: Date.now() + 10000
+        });
     });
 }
 
@@ -405,6 +516,24 @@ window.testSampleMarkdown = testSampleMarkdown;
 window.appState = stateManager.getState();
 window.sendSocketMessage = (type, payload) => webSocketHandler.sendMessage(type, payload);
 window.webSocketHandler = webSocketHandler;
+window.runSessionShortcut = createSessionShortcutHandler({
+    toggle_mic_mute: toggleMicMute,
+    toggle_universal_mute: toggleUniversalMute,
+    toggle_vision_mode: toggleVisionMode,
+    switch_vision_model: switchVisionModel,
+    capture_screenshot: captureScreenshot,
+    process_screenshots: processScreenshots,
+    reset_screenshot_queue: resetScreenshotQueue,
+    reset_interview: resetInterview,
+    end_interview: endInterview,
+    manual_question: ({ text }) => submitManualQuestion(text),
+    switch_preset: ({ preset_key }) => {
+        if (preset_key === 'secondary' && !stateManager.getState().selectedSecondaryProvider.name) return false;
+        return switchPreset(preset_key);
+    }
+}, payload => webSocketHandler.sendMessage('shortcut_applied', payload), reportClientControls);
+muteManager.on('stateChange', reportClientControls);
+setInterval(reportClientControls, 3000);
 
 // Export for external use
 export { switchView, startInterview, endInterview, stateManager, webSocketHandler, providerManager };

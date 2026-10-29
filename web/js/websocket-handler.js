@@ -30,18 +30,15 @@ export class WebSocketHandler {
     connect() {
         return new Promise((resolve, reject) => {
             this.is_intentionally_closing = false;
-            // Derive the host from the page origin. main.py picks a free port at
-            // startup and falls back off 8002 when it is busy, so a hardcoded port
-            // would break the socket exactly when the fallback kicks in.
-            const host = window.location.host || '127.0.0.1:8002';
-            const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            let url = `${scheme}//${host}/ws`;
+            const endpoint = new URL('/ws', window.location.href);
+            endpoint.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            endpoint.searchParams.set('source', /Chrome\//.test(navigator.userAgent) ? 'browser' : 'desktop');
             if (this.session_id) {
-                url += `?session_id=${this.session_id}`;
+                endpoint.searchParams.set('session_id', this.session_id);
             }
 
             this.updateCheckStatus(this.checks.backend, 'pending', 'Connecting...');
-            this.socket = new WebSocket(url);
+            this.socket = new WebSocket(endpoint.href);
             this.stateManager.setSocket(this.socket);
 
             // Store the promise's resolver to be called when session is confirmed.
@@ -136,6 +133,11 @@ export class WebSocketHandler {
     // --- All original message handlers go here ---
     handleMessage(data) {
         switch (data.type) {
+            case 'session_shortcut':
+                window.runSessionShortcut?.(data.payload);
+                break;
+            case 'controls_updated':
+                break;
             case 'api_key_status':
                 this.handleApiKeyStatus(data.payload);
                 break;
@@ -310,6 +312,10 @@ export class WebSocketHandler {
             binary += String.fromCharCode.apply(null, bytes.subarray(i, i + SLICE));
         }
         return btoa(binary);
+    }
+
+    sendManualQuestion(text) {
+        this.sendMessage('manual_question', { text });
     }
 
     startInterview() {

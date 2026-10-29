@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aura — Chrome session</title>
+    <link rel="stylesheet" href="/static/css/desktop.css">
+</head>
+<body>
+    <header>
+        <strong>AURA <span>Chrome session</span></strong>
+        <a href="/" id="back-to-setup">Setup</a>
+    </header>
+    <p id="sync-status" role="status">Connecting to Aura…</p>
+    <p id="control-state"></p>
+    <p id="click-through-status" role="status">Checking click-through…</p>
+    <p id="shortcut-status" role="status"></p>
+    <p id="sync-error" role="alert" hidden></p>
+    <nav class="session-controls" aria-label="Chrome session controls">
+        <div class="control-row">
+            <button data-session-command="toggle_mic_mute" title="Option+M">Unmute mic</button>
+            <button data-session-command="toggle_universal_mute" title="Option+U">Pause audio</button>
+            <button data-session-command="reset_interview" title="Option+R — clears the conversation">Reset</button>
+            <button data-session-command="end_interview" class="end-session">End session</button>
+        </div>
+        <div class="control-row secondary-controls">
+            <button data-session-command="toggle_vision_mode" title="Option+F">Vision off</button>
+            <button data-session-command="capture_screenshot" title="Option+S">Capture</button>
+            <button data-session-command="process_screenshots" title="Option+A">Analyse</button>
+            <button data-session-command="reset_screenshot_queue" title="Option+D">Clear queue</button>
+            <button data-session-command="switch_vision_model" title="Option+V">Vision model</button>
+            <select id="desktop-model" aria-label="Switch AI model">
+                <option value="">AI model…</option>
+                <option value="primary">Primary (⌥Q)</option>
+                <option value="secondary">Secondary (⌥W)</option>
+                <option value="auto">Auto (⌥E)</option>
+            </select>
+        </div>
+        <details class="appearance-controls">
+            <summary>Window</summary>
+            <div class="control-row">
+                <button data-appearance="opacity" data-opacity="1">100%</button>
+                <button data-appearance="opacity" data-opacity="0.7">70%</button>
+                <button data-appearance="opacity" data-opacity="0.4">40%</button>
+                <button data-appearance="click_through" title="Option+X restores mouse control">Click-through</button>
+                <button data-appearance="hide" title="Option+Z shows the window again">Hide</button>
+                <button data-appearance="move" data-direction="left" aria-label="Move window left">←</button>
+                <button data-appearance="move" data-direction="right" aria-label="Move window right">→</button>
+                <button data-appearance="move" data-direction="up" aria-label="Move window up">↑</button>
+                <button data-appearance="move" data-direction="down" aria-label="Move window down">↓</button>
+            </div>
+        </details>
+        <p id="local-control-status" role="status"></p>
+    </nav>
+    <div class="transcript-section">
+        <span>Live transcript</span><p id="transcript">Waiting for speech from Chrome.</p>
+    </div>
+    <main id="conversation-stream" tabindex="0" aria-label="Questions and answers in chronological order"></main>
+    <form id="desktop-question-form" class="question-bar">
+        <input id="desktop-question" type="text" maxlength="20000" autocomplete="off" aria-label="Type a question" placeholder="Type a question…">
+        <button id="desktop-question-send" type="submit">Ask</button>
+    </form>
+    <aside id="setup-hint">
+        Start a session in Aura’s Chrome tab and share the interview tab’s audio.
+        Keep that Chrome tab open while this window displays the conversation.
+    </aside>
+    <footer class="shortcut-strip" aria-label="Option keyboard shortcuts">
+        <span class="shortcut-key">⌥ Option:</span>
+        <span><kbd>M</kbd> mic</span><span><kbd>U</kbd> pause</span><span><kbd>R</kbd> reset</span>
+        <span><kbd>F</kbd> vision</span><span><kbd>V</kbd> vision model</span>
+        <span><kbd>S</kbd> capture</span><span><kbd>A</kbd> analyse</span><span><kbd>D</kbd> clear</span>
+        <span><kbd>Q/W/E</kbd> AI</span><span><kbd>Z</kbd> show</span><span><kbd>X</kbd> click-through</span>
+        <span><kbd>1/2/3</kbd> opacity</span><span><kbd>[ / ]</kbd> step</span>
+        <span><kbd>↑/↓</kbd> scroll</span><span><kbd>⇧Arrows</kbd> move</span>
+    </footer>
+    <script type="module" src="/static/js/desktop.js"></script>
+</body>
+</html>

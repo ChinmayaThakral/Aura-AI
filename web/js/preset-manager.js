@@ -39,7 +39,7 @@ class PresetManager {
                     <span class="preset-provider">Initializing...</span>
                 </div>
                 <div class="preset-hotkeys">
-                    <span class="hotkey-hint">Alt+Q: Primary | Alt+W: Secondary | Alt+E: Auto</span>
+                    <span class="hotkey-hint">Option+Q: Primary | Option+W: Secondary | Option+E: Auto</span>
                 </div>
             </div>
         `;
