@@ -190,7 +190,7 @@ export class ConfigManager {
     }
 
     async saveDeepgramKey() {
-        const key = this.elements.deepgramKey.value;
+        const key = this.elements.deepgramKey.value.trim();
         const btn = this.elements.saveDeepgramBtn;
         const originalText = btn.textContent;
 

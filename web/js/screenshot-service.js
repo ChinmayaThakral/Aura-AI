@@ -1,10 +1,20 @@
 // Screenshot Service for Vision AI Processing
 // Handles screen capture, queue management, and vision model integration
+import { captureNativeScreen } from './native-screen-capture.js';
+
+// Longest edge a capture is allowed to keep, in pixels. Chosen so that 1080p
+// and 1440p displays are never touched and only larger or multi-monitor
+// captures are scaled down. Raise it if you work on a 4K display and find
+// small text being missed; lower it to shrink payloads further.
+const MAX_CAPTURE_EDGE_PX = 2560;
+
+// Screenshots queued when the provider does not declare its own limit.
+const DEFAULT_MAX_SCREENSHOTS = 4;
 
 class ScreenshotService {
     constructor() {
         this.screenshotQueue = [];
-        this.maxScreenshots = 4;
+        this.maxScreenshots = DEFAULT_MAX_SCREENSHOTS;
         this.isCapturing = false;
         this.visionConfig = null;
         this.programmingLanguages = [];
@@ -278,6 +288,26 @@ class ScreenshotService {
                     border-left: 4px solid #48bb78;
                     z-index: 10000;
                     animation: slideInRight 0.3s ease-out;
+                    /* Matches the preset and transparency toasts, which are both
+                       already click-through. Without this the toast swallows
+                       clicks in the top-right corner for its full 3s lifetime. */
+                    pointer-events: none;
+                }
+
+                /* showNotification() is called with 'error' for Permission Denied,
+                   Capture Timeout, Capture Failed, Queue Full, No Vision Model,
+                   Analysis Failed and Processing Error, and 'warning' for Queue
+                   Cleared, but every one of them inherited the success green. */
+                .capture-notification.error {
+                    border-left-color: #f56565;
+                }
+
+                .capture-notification.warning {
+                    border-left-color: #ecc94b;
+                }
+
+                .capture-notification.info {
+                    border-left-color: #6366f1;
                 }
                 
                 @keyframes slideInRight {
@@ -296,11 +326,33 @@ class ScreenshotService {
     }
     
     // Configuration methods
-    setVisionConfig(visionProvider, visionModel) {
+    /**
+     * @param {number} [maxImages] Images this vision model accepts in one
+     *   request. Providers differ: Cerebras gemma-4-31b rejects a third image
+     *   with HTTP 413, while Gemini handles four. Without this the queue would
+     *   happily fill to 4 and then fail the whole batch at Option+A.
+     */
+    setVisionConfig(visionProvider, visionModel, maxImages) {
         this.visionConfig = {
             provider: visionProvider,
             model: visionModel
         };
+
+        const cap = Number(maxImages) >= 1 ? Math.min(DEFAULT_MAX_SCREENSHOTS, Math.floor(Number(maxImages))) : DEFAULT_MAX_SCREENSHOTS;
+        if (cap !== this.maxScreenshots) {
+            this.maxScreenshots = cap;
+            console.log(`🔧 Screenshot queue cap set to ${cap} for ${visionProvider} ${visionModel}`);
+            // Drop anything already queued beyond the new cap so Option+A cannot
+            // send a batch this model will reject.
+            if (this.screenshotQueue.length > cap) {
+                const dropped = this.screenshotQueue.length - cap;
+                this.screenshotQueue = this.screenshotQueue.slice(0, cap);
+                this.showNotification('📸 Queue Trimmed',
+                    `${visionModel} accepts ${cap} image${cap === 1 ? '' : 's'} per request - removed ${dropped}`, 'warning');
+            }
+            this.updateQueueUI();
+        }
+
         console.log('🔧 Vision config set:', this.visionConfig);
     }
     
@@ -324,6 +376,12 @@ class ScreenshotService {
         this.isCapturing = true;
         
         try {
+            if (window.pywebview) {
+                const {blob, dataUrl} = await captureNativeScreen();
+                this.addToQueue({id: Date.now(), blob, dataUrl, timestamp: new Date(), size: blob.size});
+                this.showNotification('📸 Screenshot Captured', `Main display queued (${this.screenshotQueue.length}/${this.maxScreenshots}) — Option+A to analyse`, 'success');
+                return true;
+            }
             // Try to use existing screen video track first
             let videoTrack = null;
             
@@ -372,13 +430,30 @@ class ScreenshotService {
                 setTimeout(() => reject(new Error('Video load timeout')), 5000);
             });
             
-            // Create canvas and capture frame
+            // Create canvas and capture frame.
+            //
+            // The primary path reuses the display track opened by audio_handler,
+            // which is requested without size constraints, so videoWidth is the
+            // full native resolution. Capping the long edge bounds the payload on
+            // very large or multi-monitor captures, where four queued screenshots
+            // could otherwise approach a provider's request size limit.
+            //
+            // Verified on a 4512x3424 diagram: both Cerebras gemma-4-31b and
+            // Gemini 3.6 Flash extracted exactly the same text before and after
+            // downscaling, and Cerebras got 32% faster. Displays at or below the
+            // cap are untouched, so most users see no change at all.
+            const scale = Math.min(1, MAX_CAPTURE_EDGE_PX / Math.max(video.videoWidth, video.videoHeight));
             const canvas = document.createElement('canvas');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            
+            canvas.width = Math.round(video.videoWidth * scale);
+            canvas.height = Math.round(video.videoHeight * scale);
+
             const ctx = canvas.getContext('2d');
-            ctx.drawImage(video, 0, 0);
+            if (scale < 1) {
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
+                console.log(`📐 Capture scaled ${video.videoWidth}x${video.videoHeight} -> ${canvas.width}x${canvas.height}`);
+            }
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             
             // Convert to blob
             const blob = await new Promise(resolve => {
@@ -404,7 +479,7 @@ class ScreenshotService {
             };
             
             this.addToQueue(screenshot);
-            this.showNotification('📸 Screenshot Captured (Global)', `Added to queue (${this.screenshotQueue.length}/${this.maxScreenshots}) - Alt+P to process`, 'success');
+            this.showNotification('📸 Screenshot Captured (Global)', `Added to queue (${this.screenshotQueue.length}/${this.maxScreenshots}) - Option+A to process`, 'success');
             
             return true;
             
@@ -471,12 +546,19 @@ class ScreenshotService {
             item.className = 'screenshot-item';
             item.innerHTML = `
                 <img src="${screenshot.dataUrl}" alt="Screenshot" class="screenshot-image">
-                <button class="screenshot-remove" onclick="screenshotService.removeFromQueue(${screenshot.id})">×</button>
+                <button class="screenshot-remove" type="button" title="Remove screenshot">×</button>
                 <div class="screenshot-info">
                     ${new Date(screenshot.timestamp).toLocaleTimeString()}
                     <br>${this.formatFileSize(screenshot.size)}
                 </div>
             `;
+            // Bind in JS rather than via an onclick attribute: keeps the numeric
+            // id (removeFromQueue compares with !==, so a string would silently
+            // never match) and drops the hidden dependency on a global.
+            const removeBtn = item.querySelector('.screenshot-remove');
+            if (removeBtn) {
+                removeBtn.addEventListener('click', () => this.removeFromQueue(screenshot.id));
+            }
             queueGrid.appendChild(item);
         });
     }
@@ -491,12 +573,12 @@ class ScreenshotService {
     async processQueue() {
         if (this.screenshotQueue.length === 0) {
             this.showNotification('❌ No Screenshots', 'Take some screenshots first', 'error');
-            return;
+            return false;
         }
         
         if (!this.visionConfig) {
             this.showNotification('❌ No Vision Model', 'Configure a vision model in settings', 'error');
-            return;
+            return false;
         }
         
         const processBtn = document.getElementById('process-queue-btn');
@@ -506,7 +588,6 @@ class ScreenshotService {
         }
         
         try {
-            const prompt = this.generateCodingPrompt();
             const screenshots = this.screenshotQueue.map(s => s.dataUrl);
             
             console.log('🔄 Processing comprehensive multi-screenshot analysis...');
@@ -514,7 +595,7 @@ class ScreenshotService {
             console.log('🧠 Generating two distinct solution approaches with full implementations');
             
             // Send to vision processing service
-            const result = await this.sendToVisionAI(prompt, screenshots);
+            const result = await this.sendToVisionAI(screenshots);
             
             if (result.success) {
                 // Note: Vision analysis display is handled by main.js WebSocket message handler
@@ -524,13 +605,16 @@ class ScreenshotService {
                 this.clearQueue();
                 this.showNotification('✅ Comprehensive Analysis Complete', 
                     `${screenshots.length} screenshots analyzed with 2 solution approaches`, 'success');
+                return true;
             } else {
                 this.showNotification('❌ Analysis Failed', result.error || 'Vision AI processing failed', 'error');
+                return false;
             }
             
         } catch (error) {
             console.error('❌ Vision processing error:', error);
             this.showNotification('❌ Processing Error', error.message, 'error');
+            return false;
         } finally {
             if (processBtn) {
                 processBtn.disabled = false;
@@ -539,96 +623,12 @@ class ScreenshotService {
         }
     }
     
-    generateCodingPrompt() {
-        const languageContext = this.programmingLanguages.length > 0 
-            ? `Focus on solutions in: ${this.programmingLanguages.join(', ')}`
-            : 'Provide solutions in popular programming languages';
-            
-        return `You are an expert coding interview assistant. Analyze the provided screenshot(s) of coding problems and provide comprehensive help with CLEAR SEPARATION between problem understanding and solution approaches.
-
-**IMPORTANT**: Analyze ALL screenshots together as ONE COMPLETE problem.
-
-${languageContext}
-
-Please provide a structured analysis with clear sections:
-
----
-
-# 🎯 PROBLEM UNDERSTANDING & ANALYSIS
-
-## 📖 Complete Problem Statement
-- **What the problem is asking:** Clear restatement from all screenshots
-- **Input/Output format:** Complete specifications
-- **All constraints:** Every constraint mentioned
-- **Examples provided:** All test cases and examples
-
-## 🔍 Key Insights
-- **Core challenge:** Main algorithmic difficulty
-- **Edge cases:** Boundary conditions to consider
-- **Problem type:** What category of algorithm/data structure
-
----
-
-# 🚀 APPROACH 1: [NAME THE FIRST APPROACH]
-
-## 💡 Strategy Overview
-- **Algorithm choice:** What technique we're using
-- **Key insight:** Why this approach works
-- **Time/Space Complexity:** O(?) analysis
-
-## 💻 Complete Implementation
-\`\`\`${this.programmingLanguages[0] || 'java'}
-// APPROACH 1: [Brief description]
-// Complete, production-ready code with comments
-// Handle all edge cases properly
-\`\`\`
-
-## 🔍 Step-by-Step Walkthrough
-Detailed explanation of how this algorithm works with examples.
-
----
-
-# ⚡ APPROACH 2: [NAME THE ALTERNATIVE APPROACH]
-
-## 💡 Strategy Overview
-- **Different algorithm:** Alternative technique
-- **Key insight:** Different way of thinking
-- **Time/Space Complexity:** O(?) - compare with Approach 1
-
-## 💻 Complete Implementation
-\`\`\`${this.programmingLanguages[0] || 'java'}
-// APPROACH 2: [Brief description]  
-// Alternative implementation showing different thinking
-// Include comprehensive comments
-\`\`\`
-
-## 🔍 Step-by-Step Walkthrough
-Explanation of the alternative approach with examples.
-
----
-
-# ⚖️ APPROACH COMPARISON
-
-## 📊 Which Approach to Choose
-- **Approach 1 is better when:** Specific scenarios
-- **Approach 2 is better when:** Different scenarios
-- **Interview recommendation:** Which to present first
-
-## 🎤 Interview Strategy
-- **Presentation tips:** How to discuss both approaches
-- **Common follow-ups:** Expected interviewer questions
-- **Time management:** Implementation priority
-
-Focus on being educational and helping understand both the solutions and the underlying concepts with CLEAR SEPARATION between each approach.`;
-    }
-    
-    async sendToVisionAI(prompt, screenshots) {
+    async sendToVisionAI(screenshots) {
         try {
             console.log(`🔍 Sending ${screenshots.length} screenshots for comprehensive analysis`);
             console.log('📝 Enhanced prompt for multi-screenshot analysis');
             
             const payload = {
-                prompt: prompt,
                 screenshots: screenshots,
                 visionConfig: this.visionConfig,
                 languages: this.programmingLanguages
@@ -710,19 +710,19 @@ Focus on being educational and helping understand both the solutions and the und
                 <p>Ready to capture and analyze screenshots anywhere!</p>
                 <div class="vision-hotkeys">
                     <div class="vision-hotkey">
-                        <kbd>Alt+S</kbd>
+                        <kbd>Option+S</kbd>
                         <span>Capture</span>
                     </div>
                     <div class="vision-hotkey">
-                        <kbd>Alt+P</kbd>
+                        <kbd>Option+A</kbd>
                         <span>Process</span>
                     </div>
                     <div class="vision-hotkey">
-                        <kbd>Alt+T</kbd>
+                        <kbd>Option+V</kbd>
                         <span>Switch Model</span>
                     </div>
                     <div class="vision-hotkey">
-                        <kbd>Alt+V</kbd>
+                        <kbd>Option+F</kbd>
                         <span>Exit Vision</span>
                     </div>
                 </div>
@@ -791,4 +791,4 @@ const screenshotService = new ScreenshotService();
 // Make it globally accessible
 window.screenshotService = screenshotService;
 
-export default screenshotService; 
+export default screenshotService;

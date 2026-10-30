@@ -4,12 +4,19 @@
 
 import { devLog, devError } from './config.js';
 import muteManager from './mute-manager.js';
+import { NativeSystemAudio } from './native-system-audio.js';
 
 let audioContext = null;
 let micStream = null;
 let systemStream = null;
 let micGainNode = null;
 let screenVideoTrack = null; // Store video track for screenshot reuse
+let nativeAudio = null;
+let captureGeneration = 0;
+
+function reportAudioStatus(detail) {
+    if (typeof window.dispatchEvent === 'function') window.dispatchEvent(new CustomEvent('aura-audio-status', {detail}));
+}
 
 /**
  * Requests permission to use the microphone and populates the dropdown.
@@ -50,6 +57,8 @@ export async function setupMicrophone() {
  * @returns {Promise<boolean>} True if processing started successfully.
  */
 export async function startAudioProcessing(micId, onAudioData) {
+    const generation = ++captureGeneration;
+    const nativeMode = Boolean(window.pywebview);
     try {
         // ── PHASE 1: Initiate EVERYTHING synchronously within user-gesture ────────
         // WebKit invalidates the gesture token after the first `await`. To keep
@@ -58,7 +67,10 @@ export async function startAudioProcessing(micId, onAudioData) {
 
         // (a) Start mic capture — initiated synchronously, not yet awaited
         const micStreamPromise = navigator.mediaDevices.getUserMedia({
-            audio: { deviceId: { exact: micId } },
+            audio: micId ? { deviceId: { exact: micId } } : true,
+        }).catch(error => {
+            if (nativeMode) return null;
+            throw error;
         });
 
         // (b) Start screen sharing — initiated synchronously, not yet awaited.
@@ -72,7 +84,7 @@ export async function startAudioProcessing(micId, onAudioData) {
                 ),
             ]);
 
-        const displayMediaPromise = withTimeout(
+        const displayMediaPromise = nativeMode ? Promise.resolve(null) : withTimeout(
             navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }),
             45000,
             'Screen sharing'
@@ -83,21 +95,26 @@ export async function startAudioProcessing(micId, onAudioData) {
         });
 
         // (c) Create AudioContext — synchronous, within gesture ✅
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
         console.log(`🎵 AudioContext created: ${audioContext.sampleRate}Hz (state: ${audioContext.state})`);
 
         // ── PHASE 2: Await all concurrent operations ──────────────────────────────
-        [micStream, systemStream] = await Promise.all([
+        const streams = await Promise.all([
             micStreamPromise,
             displayMediaPromise,
         ]);
+        if (generation !== captureGeneration) {
+            streams.forEach(stream => stream?.getTracks().forEach(track => track.stop()));
+            return false;
+        }
+        [micStream, systemStream] = streams;
 
-        if (!micStream) {
+        if (!micStream && !nativeMode) {
             console.error('Could not get microphone stream.');
             stopAudioProcessing();
             return false;
         }
-        if (!systemStream) {
+        if (!systemStream && !nativeMode) {
             console.warn('⚠️ Proceeding in mic-only mode — interviewer audio will not be captured.');
         }
 
@@ -111,12 +128,19 @@ export async function startAudioProcessing(micId, onAudioData) {
 
         // NOW load the worklet module, when context is definitely running
         await audioContext.audioWorklet.addModule('/static/js/audio_processor.js');
+        if (generation !== captureGeneration) return false;
         console.log('🎛️ AudioWorklet module loaded');
 
 
         // ── PHASE 3: Build audio graph ────────────────────────────────────────────
         // 3. Create a single mixed processor for better diarization
-        const mixedProcessor = new AudioWorkletNode(audioContext, 'mixed-processor');
+        const mixedProcessor = new AudioWorkletNode(audioContext, 'mixed-processor', {
+            numberOfInputs: 2, numberOfOutputs: 1, outputChannelCount: [1],
+            channelCount: 1, channelCountMode: 'explicit'
+        });
+        // The processor emits silence to its output; connecting it keeps Chrome
+        // pulling audio even while the capture tab is in the background.
+        mixedProcessor.connect(audioContext.destination);
 
         // Handle mixed audio with mute-aware speaker detection
         let audioProcessingCounter = 0; // For throttled logging
@@ -148,7 +172,7 @@ export async function startAudioProcessing(micId, onAudioData) {
         };
 
         // 4. Connect both sources to the mixed processor with mute control
-        const micSource = audioContext.createMediaStreamSource(micStream);
+        const micSource = micStream ? audioContext.createMediaStreamSource(micStream) : null;
 
         // On macOS, getDisplayMedia typically returns a video-only stream.
         // createMediaStreamSource() throws if the stream has NO audio tracks.
@@ -172,12 +196,14 @@ export async function startAudioProcessing(micId, onAudioData) {
         muteManager.on('microphoneMuteChange', updateMicGainNode);
         
         // Connect mic through gain node for mute control
-        micSource.connect(micGainNode);
-        micGainNode.connect(mixedProcessor);
+        if (micSource) {
+            micSource.connect(micGainNode);
+            micGainNode.connect(mixedProcessor, 0, 0);
+        }
         
         // System audio connects directly only when audio tracks were captured
         if (systemSource) {
-            systemSource.connect(mixedProcessor);
+            systemSource.connect(mixedProcessor, 0, 1);
             console.log('🔊 System audio connected to mix');
         }
 
@@ -195,8 +221,20 @@ export async function startAudioProcessing(micId, onAudioData) {
                     console.log('📹 Video track stopped (no system audio available)');
                 }
             }
-        } else {
+        } else if (!nativeMode) {
             console.warn('⚠️ Screenshots unavailable in mic-only mode');
+        }
+
+        if (nativeMode) {
+            nativeAudio = new NativeSystemAudio(samples => {
+                if (generation === captureGeneration) mixedProcessor.port.postMessage({type: 'native-system-audio', samples}, [samples.buffer]);
+            }, status => {
+                if (generation === captureGeneration) reportAudioStatus(status);
+            });
+            await nativeAudio.start();
+            if (generation !== captureGeneration) return false;
+        } else {
+            reportAudioStatus({state: hasSystemAudio ? 'live' : 'warning', message: hasSystemAudio ? 'Chrome shared-tab audio connected.' : 'Microphone only — shared-tab audio is not connected.'});
         }
 
         devLog("✅ Audio processing started successfully");
@@ -204,7 +242,10 @@ export async function startAudioProcessing(micId, onAudioData) {
 
     } catch (err) {
         console.error("❌ Error starting audio processing:", err);
-        stopAudioProcessing();
+        if (generation === captureGeneration) {
+            reportAudioStatus({state: 'error', message: err.message || 'Could not start audio capture.'});
+            stopAudioProcessing();
+        }
         return false;
     }
 }
@@ -271,10 +312,18 @@ export function isScreenSharingAvailable() {
     return screenVideoTrack && screenVideoTrack.readyState === 'live';
 }
 
+export function isSystemAudioLive() {
+    return audioContext?.state === 'running' && Boolean(nativeAudio?.isLive || systemStream?.getAudioTracks()
+        .some(track => track.readyState === 'live' && track.enabled && !track.muted));
+}
+
 /**
  * Stops all audio streams and closes the AudioContext.
  */
 export function stopAudioProcessing() {
+    captureGeneration++;
+    nativeAudio?.stop();
+    nativeAudio = null;
     console.log("Stopping audio processing.");
     if (micStream) {
         micStream.getTracks().forEach(track => track.stop());

@@ -81,7 +81,27 @@ export class StateManager {
         this.appState.socket = socket;
     }
 
+    showOnboardingError(message, field = null) {
+        const error = document.getElementById('onboarding-error');
+        if (error) {
+            error.textContent = message;
+            error.hidden = false;
+        }
+        const pane = field?.closest('.tab-pane');
+        if (pane && !pane.classList.contains('active')) {
+            document.querySelector(`.tab-btn[data-tab="${pane.id}"]`)?.click();
+        }
+        field?.focus();
+        error?.scrollIntoView({ block: 'nearest' });
+        return false;
+    }
+
     handleOnboarding() {
+        const error = document.getElementById('onboarding-error');
+        if (error) {
+            error.hidden = true;
+            error.textContent = '';
+        }
         const requiredFields = {
             'user-name': 'Name',
             'user-company': 'Company',
@@ -91,32 +111,24 @@ export class StateManager {
             'ai-model-select': 'AI Model'
         };
 
-        let allValid = true;
-
         for (const [id, name] of Object.entries(requiredFields)) {
             const element = document.getElementById(id);
-            if (!element || !element.value) {
-                alert(`${name} is a required field.`);
-                allValid = false;
-                break;
+            if (!element || !element.value.trim()) {
+                return this.showOnboardingError(`${name} is a required field.`, element);
             }
         }
 
         const focusCheckboxes = Array.from(this.onboardingForm.focusCheckboxes || []).filter(cb => cb.checked);
         if (focusCheckboxes.length === 0) {
-            alert('Please select at least one Interview Focus.');
-            allValid = false;
+            return this.showOnboardingError('Please select at least one Interview Focus.', this.onboardingForm.focusCheckboxes[0]);
         }
-
-        if (!allValid) return false;
 
         // Validate secondary provider selection
         const secondaryProvider = this.onboardingForm.secondaryProviderSelect?.value || '';
         const secondaryModel = this.onboardingForm.secondaryModelSelect?.value || '';
         
         if ((secondaryProvider && !secondaryModel) || (!secondaryProvider && secondaryModel)) {
-            alert('If you select a secondary provider, you must also select a secondary model (or leave both empty).');
-            return false;
+            return this.showOnboardingError('If you select a secondary provider, select a secondary model too, or leave both empty.', this.onboardingForm.secondaryProviderSelect);
         }
 
         if (secondaryProvider && secondaryModel) {
@@ -124,8 +136,7 @@ export class StateManager {
             const primaryModel = this.onboardingForm.modelSelect?.value || '';
             
             if (primaryProvider === secondaryProvider && primaryModel === secondaryModel) {
-                alert('Primary and secondary AI models cannot be the same. Please select different models.');
-                return false;
+                return this.showOnboardingError('Primary and secondary AI models cannot be the same. Please select different models.', this.onboardingForm.secondaryModelSelect);
             }
         }
 
@@ -134,16 +145,14 @@ export class StateManager {
         const visionModel = this.onboardingForm.visionModelSelect?.value || '';
         
         if ((visionProvider && !visionModel) || (!visionProvider && visionModel)) {
-            alert('If you select a vision provider, you must also select a vision model (or leave both empty).');
-            return false;
+            return this.showOnboardingError('If you select a vision provider, select a vision model too, or leave both empty.', this.onboardingForm.visionProviderSelect);
         }
 
         const secondaryVisionProvider = this.onboardingForm.visionSecondaryProviderSelect?.value || '';
         const secondaryVisionModel = this.onboardingForm.visionSecondaryModelSelect?.value || '';
         
         if ((secondaryVisionProvider && !secondaryVisionModel) || (!secondaryVisionProvider && secondaryVisionModel)) {
-            alert('If you select a secondary vision provider, you must also select a secondary vision model (or leave both empty).');
-            return false;
+            return this.showOnboardingError('If you select a secondary vision provider, select a secondary vision model too, or leave both empty.', this.onboardingForm.visionSecondaryProviderSelect);
         }
 
         // Store validated data
@@ -181,6 +190,17 @@ export class StateManager {
     }
 
     // Vision Mode Functions
+
+    /**
+     * Images the selected vision provider accepts in one request.
+     * Returns undefined when the provider does not declare a limit, which
+     * leaves the screenshot queue on its default cap.
+     */
+    _visionMaxImages(providerName) {
+        const provider = (this.appState.aiProviders || []).find(p => p.name === providerName);
+        return provider?.maxImages;
+    }
+
     toggleVisionMode() {
         console.log('🎮 toggleVisionMode called (could be from global hotkey)');
         
@@ -219,7 +239,7 @@ export class StateManager {
                 ? this.appState.selectedVisionProvider 
                 : this.appState.selectedSecondaryVisionProvider;
                 
-            screenshotService.setVisionConfig(currentProvider.name, currentProvider.model);
+            screenshotService.setVisionConfig(currentProvider.name, currentProvider.model, this._visionMaxImages(currentProvider.name));
             screenshotService.setProgrammingLanguages(this.appState.selectedLanguages);
             screenshotService.showVisionMode(true);
             
@@ -254,7 +274,7 @@ export class StateManager {
         }
 
         if (!this.appState.visionMode.isActive) {
-            const msg = 'Vision model switching is only available in Vision Mode (Alt+V).';
+            const msg = 'Vision model switching is only available in Vision Mode — press Option+F to enable it first.';
             devWarn(msg);
             if (window.presetManager) presetManager.showErrorNotification(msg);
             return false;
@@ -282,7 +302,7 @@ export class StateManager {
             ? this.appState.selectedSecondaryVisionProvider
             : this.appState.selectedVisionProvider;
 
-        screenshotService.setVisionConfig(currentProviderConfig.name, currentProviderConfig.model);
+        screenshotService.setVisionConfig(currentProviderConfig.name, currentProviderConfig.model, this._visionMaxImages(currentProviderConfig.name));
         screenshotService.updateQueueUI();
 
         const providerType = wasOnPrimary ? 'Secondary (2°)' : 'Primary (1°)';
@@ -318,11 +338,11 @@ export class StateManager {
         }
         
         if (!this.appState.visionMode.isActive) {
-            console.warn('⚠️ Screenshots can only be taken in vision mode - use Alt+V to enter vision mode first');
+            console.warn('⚠️ Screenshots can only be taken in vision mode - use Option+F to enter vision mode first');
             if (window.presetManager) {
-                presetManager.showErrorNotification('Enter vision mode first (Alt+V) before taking screenshots');
+                presetManager.showErrorNotification('Enter vision mode first (Option+F) before taking screenshots');
             } else {
-                alert('Enter vision mode first (Alt+V) before taking screenshots');
+                alert('Enter vision mode first (Option+F) before taking screenshots');
             }
             return false;
         }
@@ -345,11 +365,11 @@ export class StateManager {
         }
         
         if (!this.appState.visionMode.isActive) {
-            console.warn('⚠️ Screenshots can only be processed in vision mode - use Alt+V to enter vision mode first');
+            console.warn('⚠️ Screenshots can only be processed in vision mode - use Option+F to enter vision mode first');
             if (window.presetManager) {
-                presetManager.showErrorNotification('Enter vision mode first (Alt+V) before processing screenshots');
+                presetManager.showErrorNotification('Enter vision mode first (Option+F) before processing screenshots');
             } else {
-                alert('Enter vision mode first (Alt+V) before processing screenshots');
+                alert('Enter vision mode first (Option+F) before processing screenshots');
             }
             return false;
         }
@@ -372,11 +392,11 @@ export class StateManager {
         }
         
         if (!this.appState.visionMode.isActive) {
-            console.warn('⚠️ Screenshot queue can only be reset in vision mode - use Alt+V to enter vision mode first');
+            console.warn('⚠️ Screenshot queue can only be reset in vision mode - use Option+F to enter vision mode first');
             if (window.presetManager) {
-                presetManager.showErrorNotification('Enter vision mode first (Alt+V) before resetting screenshot queue');
+                presetManager.showErrorNotification('Enter vision mode first (Option+F) before resetting screenshot queue');
             } else {
-                alert('Enter vision mode first (Alt+V) before resetting screenshot queue');
+                alert('Enter vision mode first (Option+F) before resetting screenshot queue');
             }
             return false;
         }
@@ -527,4 +547,4 @@ export class StateManager {
         console.log('✅ Reset to initial state complete');
         return true;
     }
-} 
+}

@@ -1,16 +1,33 @@
-import orjson
+import io
+import os
+import shutil
+from typing import Literal
+from urllib.parse import urlsplit
+
 import aiofiles
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from core.config import settings
+import orjson
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from pydantic import BaseModel, Field
+
 import window_manager
+from core.config import settings
+from core.env_utils import env_manager
+from core.key_utils import resolve_provider_keys
+from core.paths import data_dir
+from services.desktop_sync import desktop_sync
 from services.llm_service import verify_provider_connection
 from services.vision_service import verify_vision_provider_connection
-from core.env_utils import env_manager
-import shutil
-import os
 
 router = APIRouter()
+
+@router.get("/api/profile")
+async def get_default_profile():
+    """Read optional personal defaults from the app's writable data directory."""
+    path = data_dir() / "profile.json"
+    if not path.is_file():
+        return {}
+    async with aiofiles.open(path, "rb") as f:
+        return orjson.loads(await f.read())
 
 class TransparencyRequest(BaseModel):
     transparency: float  # 0.0 to 1.0
@@ -27,6 +44,102 @@ class SaveProvidersRequest(BaseModel):
 
 class SaveKeyRequest(BaseModel):
     key: str
+
+class DesktopDisplayRequest(BaseModel):
+    enabled: bool
+
+class DesktopCommandRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    command: Literal[
+        "toggle_mic_mute",
+        "toggle_universal_mute",
+        "switch_preset",
+        "toggle_vision_mode",
+        "switch_vision_model",
+        "capture_screenshot",
+        "process_screenshots",
+        "reset_screenshot_queue",
+        "reset_interview",
+        "end_interview",
+        "manual_question",
+    ]
+    preset_key: Literal["primary", "secondary", "auto"] = "primary"
+    text: str = Field(default="", max_length=20000)
+
+
+class DesktopAppearanceRequest(BaseModel):
+    action: Literal["opacity", "click_through", "hide", "move"]
+    opacity: Literal[0.4, 0.7, 1.0] = 1.0
+    direction: Literal["up", "down", "left", "right"] = "up"
+
+
+def require_local_origin(request: Request):
+    origin = request.headers.get("origin")
+    if origin:
+        parsed = urlsplit(origin)
+        if parsed.scheme != request.url.scheme or parsed.netloc != request.url.netloc:
+            raise HTTPException(
+                status_code=403, detail="Desktop controls require the local Aura page."
+            )
+
+
+@router.post("/api/desktop/command")
+async def desktop_command(command: DesktopCommandRequest, request: Request):
+    from api.session_manager import session_manager
+
+    require_local_origin(request)
+    success = await session_manager.route_shortcut(command.model_dump())
+    if not success:
+        raise HTTPException(
+            status_code=409,
+            detail="This Chrome session is no longer connected. Reconnect before using its controls.",
+        )
+    return {"success": True}
+
+
+@router.post("/api/desktop/appearance")
+async def desktop_appearance(command: DesktopAppearanceRequest, request: Request):
+    require_local_origin(request)
+    manager = window_manager.window_manager
+    if command.action == "opacity":
+        success = manager.set_transparency(command.opacity)
+    elif command.action == "click_through":
+        if not manager.is_ghost_mode and not manager.can_restore_click_through():
+            raise HTTPException(
+                status_code=409,
+                detail="Enable Aura in macOS Accessibility and restart it first. Option+X must be available to restore window controls.",
+            )
+        success = manager.toggle_ghost_mode()
+    elif command.action == "hide":
+        manager.toggle_visibility()
+        success = True
+    else:
+        moves = {"up": (0, -20), "down": (0, 20), "left": (-20, 0), "right": (20, 0)}
+        success = manager.move_window(*moves[command.direction])
+    return {"success": success}
+
+
+@router.get("/api/desktop/appearance")
+async def desktop_appearance_state():
+    return window_manager.window_manager.get_click_through_state()
+
+
+@router.post("/api/window/desktop-display")
+async def configure_desktop_display(request: DesktopDisplayRequest):
+    if request.enabled and not desktop_sync.readiness()["ready"]:
+        raise HTTPException(status_code=409, detail=desktop_sync.readiness()["message"])
+    return {
+        "success": window_manager.window_manager.set_desktop_display(request.enabled)
+    }
+
+
+@router.get("/api/desktop/status")
+async def desktop_status():
+    return {
+        **desktop_sync.readiness(),
+        "shortcuts_ready": window_manager.window_manager.can_restore_click_through(),
+    }
+
 
 @router.get("/api/config")
 async def get_config():
@@ -65,6 +178,10 @@ async def get_ai_providers():
                 "models": p.get("models", []),
                 "visionModels": p.get("visionModels", []),
                 "supportsVision": p.get("supportsVision", False),
+                # Images this provider accepts in a single request. The
+                # screenshot queue caps itself to this so a batch is never
+                # assembled that the selected vision model will reject.
+                "maxImages": p.get("maxImages"),
                 "defaultPrimary": p.get("defaultPrimary", False),
                 "defaultSecondary": p.get("defaultSecondary", False),
                 "defaultVisionPrimary": p.get("defaultVisionPrimary", False),
@@ -119,10 +236,14 @@ async def get_deepgram_key():
 
 @router.post("/api/save-deepgram-key")
 async def save_deepgram_key(request: SaveKeyRequest):
-    """Updates the DEEPGRAM_API_KEY in the .env file."""
+    """Save the key for verification and new transcription sessions."""
+    key = request.key.strip()
+    if any(character in key for character in ('\r', '\n', '"')):
+        raise HTTPException(status_code=400, detail="Paste only the Deepgram key secret, without quotes or line breaks.")
     try:
-        success = env_manager.update_key("DEEPGRAM_API_KEY", request.key)
+        success = env_manager.update_key("DEEPGRAM_API_KEY", key)
         if success:
+            settings.DEEPGRAM_API_KEY = key
             return {"success": True, "message": "Deepgram API key saved successfully"}
         else:
             raise HTTPException(status_code=500, detail="Failed to update .env file")
@@ -145,10 +266,11 @@ async def verify_ai_provider(request: ProviderVerifyRequest):
         if not provider_config:
             raise HTTPException(status_code=404, detail=f"Provider '{request.name}' not found.")
 
-        # Get all available keys, with fallback to single apiKey
-        api_keys = provider_config.get("apiKeys", [provider_config.get("apiKey", "")])
+        # Get all usable keys (blank/placeholder entries filtered out)
+        api_keys = resolve_provider_keys(provider_config)
         if not api_keys:
-            api_keys = [provider_config.get("apiKey", "")]
+            print(f"⚠️ No usable API key configured for {request.name}")
+            return {"success": False, "error": "No API key configured for this provider."}
 
         # Try each key until one works
         for i, key in enumerate(api_keys):
@@ -200,10 +322,11 @@ async def verify_vision_ai_provider(request: ProviderVerifyRequest):
         if not model_config:
             raise HTTPException(status_code=400, detail=f"Model '{request.model}' is not a vision model for '{request.name}'.")
 
-        # Get all available keys, with fallback to single apiKey
-        api_keys = provider_config.get("apiKeys", [provider_config.get("apiKey", "")])
+        # Get all usable keys (blank/placeholder entries filtered out)
+        api_keys = resolve_provider_keys(provider_config)
         if not api_keys:
-            api_keys = [provider_config.get("apiKey", "")]
+            print(f"⚠️ No usable vision API key configured for {request.name}")
+            return {"success": False, "error": "No API key configured for this provider."}
 
         # Try each key until one works
         for i, key in enumerate(api_keys):
@@ -281,3 +404,43 @@ async def make_opaque():
     else:
         raise HTTPException(status_code=400, detail="Failed to set transparency")
 
+
+
+@router.post("/api/extract-pdf")
+async def extract_pdf(file: UploadFile = File(...)):
+    """
+    Extract plain text from an uploaded PDF (used by onboarding PDF upload).
+    Returns { filename, text, pages, chars }.
+    """
+    filename = file.filename or "document.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    raw = await file.read()
+    # Guard against very large uploads (25 MB).
+    if len(raw) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="PDF too large (max 25 MB).")
+
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(raw))
+        parts = []
+        for page in reader.pages:
+            txt = (page.extract_text() or "").strip()
+            if txt:
+                parts.append(txt)
+        text = "\n\n".join(parts).strip()
+        # Normalize common typographic ligatures that PDFs embed as single glyphs.
+        for lig, repl in (("ﬁ", "fi"), ("ﬂ", "fl"), ("ﬀ", "ff"), ("ﬃ", "ffi"),
+                          ("ﬄ", "ffl"), ("ﬅ", "ft"), ("ﬆ", "st")):
+            text = text.replace(lig, repl)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read PDF: {str(exc)[:200]}")
+
+    if not text:
+        raise HTTPException(
+            status_code=422,
+            detail="No selectable text found — this PDF may be scanned/image-only.",
+        )
+
+    return {"filename": filename, "text": text, "pages": len(reader.pages), "chars": len(text)}

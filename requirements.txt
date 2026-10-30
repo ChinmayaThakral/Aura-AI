@@ -30,6 +30,11 @@ orjson
 
 # Async file I/O
 aiofiles
+anyio
+
+# PDF text extraction (onboarding PDF upload) + multipart form parsing
+pypdf
+python-multipart
 
 # Global hotkeys (requires Input Monitoring permission on macOS)
 pynput

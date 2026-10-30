@@ -209,7 +209,7 @@ export class ProviderManager {
      * @param {HTMLSelectElement} selectElement - The dropdown element to populate
      * @param {string} defaultOptionText - Text for the default option
      */
-    _populateModelDropdown(models, selectElement, defaultOptionText) {
+    _populateModelDropdown(models, selectElement, defaultOptionText, preferredModel = '') {
         if (!selectElement || !models) return;
 
         // Clear existing options and add default
@@ -217,9 +217,22 @@ export class ProviderManager {
         selectElement.disabled = true;
 
         if (models.length > 0) {
+            // A provider may list the same model twice, once as a routed object
+            // and once as a bare string (OpenRouter does). The backend resolves
+            // a name to the first entry that matches, so a second option with
+            // the same value is unreachable: it silently applies the first
+            // entry's routing. Keep the first occurrence so the dropdown agrees
+            // with what the backend will actually use.
+            const seen = new Set();
             models.forEach(model => {
+                const modelValue = typeof model === 'string' ? model : model?.modelName;
+                if (modelValue) {
+                    if (seen.has(modelValue)) return;
+                    seen.add(modelValue);
+                }
+
                 const option = document.createElement('option');
-                
+
                 // Handle both string models and object models with routing
                 if (typeof model === 'string') {
                     // Simple string model - use as both value and display text
@@ -234,58 +247,70 @@ export class ProviderManager {
                     console.warn('Unexpected model format:', model);
                     return; // Skip this model
                 }
-                
+
                 selectElement.appendChild(option);
             });
             selectElement.disabled = false;
+
+            // Auto-select the preferred (default) model synchronously so callers
+            // don't have to race a setTimeout to set it. Falls back to the first
+            // model so a chosen provider always has a model selected.
+            const preferredName = this._getModelName(preferredModel);
+            const hasPreferred = preferredName &&
+                Array.from(selectElement.options).some(o => o.value === preferredName);
+            selectElement.value = hasPreferred ? preferredName : selectElement.options[1].value;
         }
     }
 
     updateModelDropdown() {
         const providerName = this.onboardingForm.providerSelect?.value;
         const provider = this.aiProviders.find(p => p.name === providerName);
-        
+
         // Use the smart helper function to populate the dropdown
         this._populateModelDropdown(
             provider?.models || [],
             this.onboardingForm.modelSelect,
-            'Select Model'
+            'Select Model',
+            provider?.defaultModel
         );
     }
 
     updateSecondaryModelDropdown() {
         const providerName = this.onboardingForm.secondaryProviderSelect?.value;
         const provider = this.aiProviders.find(p => p.name === providerName);
-        
+
         // Use the smart helper function to populate the dropdown
         this._populateModelDropdown(
             provider?.models || [],
             this.onboardingForm.secondaryModelSelect,
-            'Select Secondary Model'
+            'Select Secondary Model',
+            provider?.defaultModel
         );
     }
 
     updateVisionModelDropdown() {
         const providerName = this.onboardingForm.visionProviderSelect?.value;
         const provider = this.aiProviders.find(p => p.name === providerName);
-        
+
         // Use the smart helper function to populate the dropdown
         this._populateModelDropdown(
             provider?.visionModels || [],
             this.onboardingForm.visionModelSelect,
-            'Select Vision Model'
+            'Select Vision Model',
+            provider?.defaultVisionModel
         );
     }
 
     updateSecondaryVisionModelDropdown() {
         const providerName = this.onboardingForm.visionSecondaryProviderSelect?.value;
         const provider = this.aiProviders.find(p => p.name === providerName);
-        
+
         // Use the smart helper function to populate the dropdown
         this._populateModelDropdown(
             provider?.visionModels || [],
             this.onboardingForm.visionSecondaryModelSelect,
-            'Select Secondary Vision Model'
+            'Select Secondary Vision Model',
+            provider?.defaultVisionModel
         );
     }
 
@@ -381,7 +406,7 @@ export class ProviderManager {
         }
     }
 
-    handleApiKeyStatus({ service, valid }) {
+    handleApiKeyStatus({ service, valid, message }) {
         devLog(`⬅️ [ProviderManager] Handling 'api_key_status' for ${service}. Valid: ${valid}`);
         
         if (service === 'deepgram') {
@@ -390,7 +415,7 @@ export class ProviderManager {
             if (valid) {
                 this.webSocketHandler.updateCheckStatus(checkElement, 'success', `${serviceName} API OK`);
             } else {
-                this.webSocketHandler.updateCheckStatus(checkElement, 'error', `${serviceName} API Key Invalid`);
+                this.webSocketHandler.updateCheckStatus(checkElement, 'error', message || `${serviceName} API Key Invalid`);
             }
             // Crucially, check all systems *after* the status has been updated.
             this.webSocketHandler.checkAllSystemsGo();

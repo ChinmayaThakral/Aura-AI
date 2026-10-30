@@ -7,12 +7,24 @@ venv/
 __pycache__/
 *.pyc
 
+# --- Node (web UI tests) ---
+node_modules/
+
 # --- VSCode ---
 .vscode/
 
 # --- Build artifacts ---
 dist/
 build/
+# Keep the packaging config under version control
 *.spec
+!Aura.spec
 # AI Provider configuration file with secret keys
 ai_providers.json
+
+# Personal default interview profile (resume / JD)
+web/js/dev.js
+profile.json
+
+# macOS metadata
+.DS_Store

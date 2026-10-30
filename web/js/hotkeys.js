@@ -1,6 +1,6 @@
 // hotkeys.js — macOS Edition
 // Provides keyboard shortcuts for transparency and other controls.
-// macOS: Alt key = ⌥ Option key.  Key codes are identical — only UI labels change.
+// KeyboardEvent.altKey represents the ⌥ Option modifier on macOS.
 
 import { devLog } from './config.js';
 import muteManager from './mute-manager.js';
@@ -32,6 +32,7 @@ class HotkeyManager {
 
     handleKeyDown(event) {
         if (!this.isEnabled) return;
+        if (window.__auraNativeShortcuts) return;
 
         // ⌥[ → decrease opacity  (use event.code — event.key is '{' on macOS)
         if (event.altKey && event.code === 'BracketLeft') {

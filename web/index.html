@@ -17,6 +17,13 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
     <script
         src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+    <!-- KaTeX for LaTeX math in AI responses (keep in sync with package.json) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.19.0/katex.min.css"
+        integrity="sha512-ShgGHY1DxXgJ048WLBq4a1WB85Ppw9pb59F5waDdd/mAzSuKfCg4pzrsIECClh+1IhwY3ux6e4ZEbjw15y9kGQ=="
+        crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.19.0/katex.min.js"
+        integrity="sha512-PMGpBvoAMUyHk238o5oDsOos5wAGWnc02JgF5lk5T5Nt2K4A2RHW0NyL1jd+IRSh0DmxcQNu0j/OhhrTDfaw0Q=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
 
 <body>
@@ -29,6 +36,11 @@
                 <span class="brand-tagline">AI Interview Coach</span>
             </div>
             <p class="subtitle">Set up your profile, AI preferences, and API credentials.</p>
+            <div class="desktop-sync-link">
+                <button type="button" id="show-chrome-session" disabled>Show Chrome session in this window</button>
+                <small id="chrome-readiness" role="status">Checking Chrome session and tab audio…</small>
+                <small id="shortcut-readiness"></small>
+            </div>
 
             <!-- Tab Navigation -->
             <div class="tabs-nav">
@@ -70,6 +82,32 @@
                         <textarea id="user-objectives"
                             placeholder="Paste the job description or key requirements here to give the AI context."></textarea>
                     </fieldset>
+
+                    <fieldset>
+                        <legend>Upload PDFs (optional) — text is added to your background above</legend>
+                        <div class="pdf-upload-grid">
+                            <label class="pdf-upload-slot">
+                                <span class="pdf-slot-title">📄 Internship</span>
+                                <input type="file" accept="application/pdf,.pdf" data-pdf-target="resume"
+                                    data-pdf-label="INTERNSHIP">
+                                <span class="pdf-slot-status" data-pdf-status>No file</span>
+                            </label>
+                            <label class="pdf-upload-slot">
+                                <span class="pdf-slot-title">📄 Projects</span>
+                                <input type="file" accept="application/pdf,.pdf" data-pdf-target="resume"
+                                    data-pdf-label="PROJECTS">
+                                <span class="pdf-slot-status" data-pdf-status>No file</span>
+                            </label>
+                            <label class="pdf-upload-slot">
+                                <span class="pdf-slot-title">📄 Behavioral</span>
+                                <input type="file" accept="application/pdf,.pdf" data-pdf-target="resume"
+                                    data-pdf-label="BEHAVIORAL">
+                                <span class="pdf-slot-status" data-pdf-status>No file</span>
+                            </label>
+                        </div>
+                        <small class="config-hint">Selectable-text PDFs only (scanned/image PDFs won't extract).
+                            Extracted text is appended to your background — you can edit it above.</small>
+                    </fieldset>
                 </div>
 
                 <!-- Tab 2: AI Setup -->
@@ -80,10 +118,10 @@
                             <div class="ai-config-primary">
                                 <h4>Primary AI Model (Default)</h4>
                                 <div class="ai-config-group">
-                                    <select id="ai-provider-select" required>
+                                    <select id="ai-provider-select" aria-label="Primary AI provider" required>
                                         <option value="">Select AI Provider</option>
                                     </select>
-                                    <select id="ai-model-select" disabled required>
+                                    <select id="ai-model-select" aria-label="Primary AI model" disabled required>
                                         <option value="">Select Model</option>
                                     </select>
                                 </div>
@@ -94,23 +132,23 @@
                             <div class="ai-config-secondary">
                                 <h4>Secondary AI Model (Optional)</h4>
                                 <div class="ai-config-group">
-                                    <select id="ai-secondary-provider-select">
+                                    <select id="ai-secondary-provider-select" aria-label="Secondary AI provider">
                                         <option value="">Select Secondary Provider (Optional)</option>
                                     </select>
-                                    <select id="ai-secondary-model-select" disabled>
+                                    <select id="ai-secondary-model-select" aria-label="Secondary AI model" disabled>
                                         <option value="">Select Secondary Model</option>
                                     </select>
                                 </div>
-                                <small class="config-hint">Switch to secondary model anytime with Alt+W hotkey during
+                                <small class="config-hint">Switch to secondary model anytime with Option+W hotkey during
                                     interview</small>
                             </div>
 
                             <div class="preset-info">
                                 <h4>Quick Switch Hotkeys</h4>
                                 <div class="hotkey-list">
-                                    <span class="hotkey-item"><kbd>Alt+Q</kbd> Primary Model</span>
-                                    <span class="hotkey-item"><kbd>Alt+W</kbd> Secondary Model</span>
-                                    <span class="hotkey-item"><kbd>Alt+E</kbd> Auto-Select Best</span>
+                                    <span class="hotkey-item"><kbd>Option+Q</kbd> Primary Model</span>
+                                    <span class="hotkey-item"><kbd>Option+W</kbd> Secondary Model</span>
+                                    <span class="hotkey-item"><kbd>Option+E</kbd> Auto-Select Best</span>
                                 </div>
                             </div>
                         </div>
@@ -122,10 +160,10 @@
                             <div class="vision-config-primary">
                                 <h4>Primary Vision Model (Default)</h4>
                                 <div class="ai-config-group">
-                                    <select id="vision-provider-select">
+                                    <select id="vision-provider-select" aria-label="Primary vision provider">
                                         <option value="">Select Vision Provider (Optional)</option>
                                     </select>
-                                    <select id="vision-model-select" disabled>
+                                    <select id="vision-model-select" aria-label="Primary vision model" disabled>
                                         <option value="">Select Vision Model</option>
                                     </select>
                                 </div>
@@ -136,14 +174,14 @@
                             <div class="vision-config-secondary">
                                 <h4>Secondary Vision Model (Optional)</h4>
                                 <div class="ai-config-group">
-                                    <select id="vision-secondary-provider-select">
+                                    <select id="vision-secondary-provider-select" aria-label="Secondary vision provider">
                                         <option value="">Select Secondary Vision Provider (Optional)</option>
                                     </select>
-                                    <select id="vision-secondary-model-select" disabled>
+                                    <select id="vision-secondary-model-select" aria-label="Secondary vision model" disabled>
                                         <option value="">Select Secondary Vision Model</option>
                                     </select>
                                 </div>
-                                <small class="config-hint">Switch to secondary vision model with Alt+T during vision
+                                <small class="config-hint">Switch to secondary vision model with Option+V during vision
                                     mode</small>
                             </div>
 
@@ -214,20 +252,20 @@
                     <div class="commands-layout">
                         <div class="pro-tips-section">
                             <div class="pro-tip-card">
-                                <h4>🥷 Stealth Professional Tip</h4>
-                                <p>Always interact with the app using <strong>Global Hotkeys</strong>. Clicking on the
-                                    window during a proctored exam may trigger focus-detection alerts from monitoring
-                                    software.</p>
+                                <h4>⌥ Option shortcuts on Mac</h4>
+                                <p>Window controls affect desktop Aura. During Chrome sync, session controls apply to
+                                    the Chrome session capturing audio. Enable Aura in Privacy &amp; Security → Accessibility
+                                    for shortcuts while another app is focused.</p>
                             </div>
                             <div class="pro-tip-card vision">
                                 <h4>📸 Multi-Screenshot Analysis</h4>
-                                <p>You can capture multiple screenshots with <kbd>Alt+S</kbd> to build a queue, then
-                                    process them all at once with <kbd>Alt+P</kbd>. This is highly recommended for
+                                <p>You can capture multiple screenshots with <kbd>Option+S</kbd> to build a queue, then
+                                    process them all at once with <kbd>Option+A</kbd>. This is highly recommended for
                                     complex multi-part coding questions.</p>
                             </div>
                             <div class="pro-tip-card performance">
                                 <h4>⚡ Speed Strategy</h4>
-                                <p>If your primary AI model is lagging, use <kbd>Alt+E</kbd> to immediately trigger
+                                <p>If your primary AI model is lagging, use <kbd>Option+E</kbd> to immediately trigger
                                     Auto-Select. Aura will switch you to the fastest healthy provider available.</p>
                             </div>
                         </div>
@@ -236,42 +274,43 @@
                             <div class="command-category">
                                 <h5>🎭 Stealth & Appearance</h5>
                                 <ul class="command-list">
-                                    <li><kbd>Alt+X</kbd> <span>Toggle Ghost Mode (Click-through)</span></li>
-                                    <li><kbd>Alt+Z</kbd> <span>Toggle Visibility (Show/Hide)</span></li>
-                                    <li><kbd>Alt+1</kbd> <span>Set Transparent (40% Opacity)</span></li>
-                                    <li><kbd>Alt+2</kbd> <span>Set Semi-Opaque (70% Opacity)</span></li>
-                                    <li><kbd>Alt+3</kbd> <span>Set Fully Opaque (100% Opacity)</span></li>
+                                    <li><kbd>Option+X</kbd> <span>Toggle Ghost Mode (Click-through)</span></li>
+                                    <li><kbd>Option+Z</kbd> <span>Toggle Visibility (Show/Hide)</span></li>
+                                    <li><kbd>Option+1</kbd> <span>Set Fully Opaque (100% Opacity)</span></li>
+                                    <li><kbd>Option+2</kbd> <span>Set Semi-Opaque (70% Opacity)</span></li>
+                                    <li><kbd>Option+3</kbd> <span>Set Transparent (40% Opacity)</span></li>
+                                    <li><kbd>Option+[ / ]</kbd> <span>Decrease / Increase Opacity</span></li>
                                 </ul>
                             </div>
 
                             <div class="command-category">
                                 <h5>🧠 AI Model Control</h5>
                                 <ul class="command-list">
-                                    <li><kbd>Alt+Q</kbd> <span>Switch to Primary Preset</span></li>
-                                    <li><kbd>Alt+W</kbd> <span>Switch to Secondary Preset</span></li>
-                                    <li><kbd>Alt+E</kbd> <span>Auto-Select Best Available</span></li>
-                                    <li><kbd>Alt+T</kbd> <span>Switch Vision AI Model</span></li>
+                                    <li><kbd>Option+Q</kbd> <span>Switch to Primary Preset</span></li>
+                                    <li><kbd>Option+W</kbd> <span>Switch to Secondary Preset</span></li>
+                                    <li><kbd>Option+E</kbd> <span>Auto-Select Best Available</span></li>
+                                    <li><kbd>Option+V</kbd> <span>Switch Vision AI Model</span></li>
                                 </ul>
                             </div>
 
                             <div class="command-category">
                                 <h5>👁️ Vision AI Actions</h5>
                                 <ul class="command-list">
-                                    <li><kbd>Alt+V</kbd> <span>Toggle Vision Mode Overlay</span></li>
-                                    <li><kbd>Alt+S</kbd> <span>Capture/Queue Screenshot</span></li>
-                                    <li><kbd>Alt+P</kbd> <span>Process Screenshot Queue</span></li>
-                                    <li><kbd>Alt+R</kbd> <span>Clear Screenshot Queue</span></li>
+                                    <li><kbd>Option+F</kbd> <span>Toggle Vision Mode Overlay</span></li>
+                                    <li><kbd>Option+S</kbd> <span>Capture/Queue Screenshot</span></li>
+                                    <li><kbd>Option+A</kbd> <span>Process Screenshot Queue</span></li>
+                                    <li><kbd>Option+D</kbd> <span>Clear Screenshot Queue</span></li>
                                 </ul>
                             </div>
 
                             <div class="command-category">
                                 <h5>🕹️ Interaction & Utils</h5>
                                 <ul class="command-list">
-                                    <li><kbd>Alt+M</kbd> <span>Toggle Mic Mute</span></li>
-                                    <li><kbd>Alt+U</kbd> <span>Universal Pause/Mute</span></li>
-                                    <li><kbd>Alt+O</kbd> <span>Reset Interview Session</span></li>
-                                    <li><kbd>Alt+↑/↓</kbd> <span>Continuous Scrolling</span></li>
-                                    <li><kbd>Alt+Arrows</kbd> <span>Move Window Precision</span></li>
+                                    <li><kbd>Option+M</kbd> <span>Toggle Mic Mute</span></li>
+                                    <li><kbd>Option+U</kbd> <span>Universal Pause/Mute</span></li>
+                                    <li><kbd>Option+R</kbd> <span>Reset Interview Session</span></li>
+                                    <li><kbd>Option+↑/↓</kbd> <span>Continuous Scrolling</span></li>
+                                    <li><kbd>Option+Shift+Arrows</kbd> <span>Move Window Precision</span></li>
                                 </ul>
                             </div>
                         </div>
@@ -279,6 +318,7 @@
                 </div>
             </div>
 
+            <p id="onboarding-error" class="onboarding-error" role="alert" hidden></p>
             <button id="proceed-to-checks">Proceed to Device Setup</button>
         </div>
     </div>
@@ -287,11 +327,12 @@
     <div id="preflight-view" class="view">
         <div class="container">
             <h1>Aura Pre-Flight Check</h1>
+            <p id="system-capture-info" role="status"></p>
             <div id="checks">
                 <div class="check-item" id="check-mic-permission"><span class="indicator">⚪</span> Microphone Permission
                 </div>
                 <div class="check-item" id="check-mic-selection"><span class="indicator">⚪</span> Microphone Selection
-                    <select id="mic-select" disabled></select>
+                    <select id="mic-select" aria-label="Microphone device" disabled></select>
                 </div>
                 <div class="check-item" id="check-backend"><span class="indicator">⚪</span> Backend Connection</div>
                 <div class="check-item" id="check-deepgram"><span class="indicator">⚪</span> Deepgram API</div>
@@ -321,7 +362,7 @@
                     <span>Live Interview Session</span>
                 </div>
                 <div class="header-controls">
-                    <button id="mute-btn" class="mute-btn" title="Mute microphone input to app (Alt+M)">
+                    <button id="mute-btn" class="mute-btn" title="Mute microphone input to app (Option+M)">
                         <span class="mute-icon">🎤</span>
                         <span class="mute-text">Mute</span>
                     </button>
@@ -331,6 +372,7 @@
             </div>
 
             <!-- Main Content Area -->
+            <p id="audio-source-status" role="status"></p>
             <div class="interview-content">
                 <div class="conversation-stream" id="conversation-stream">
                     <!-- Dynamic content will be added here -->
@@ -344,6 +386,19 @@
                     <span>Listening...</span>
                 </div>
             </div>
+
+            <!-- Manual text question input -->
+            <form id="manual-question-form" class="manual-question-bar">
+                <input type="text" id="manual-question-input" autocomplete="off"
+                    placeholder="Type a question and press Enter to ask the AI…">
+                <button type="submit" id="manual-question-send">Ask</button>
+            </form>
+            <footer class="live-shortcuts" aria-label="Option keyboard shortcuts">
+                <span>⌥ Option:</span><span>M mic</span><span>U pause</span><span>R reset</span>
+                <span>F vision</span><span>V vision model</span><span>S capture</span><span>A analyse</span><span>D clear</span>
+                <span>Q/W/E AI</span><span>Z show</span><span>X click-through</span><span>1/2/3 opacity</span>
+                <span>[ / ] step</span><span>↑/↓ scroll</span><span>⇧Arrows move</span>
+            </footer>
         </div>
     </div>
 

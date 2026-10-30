@@ -7,33 +7,43 @@ from deepgram import (
     LiveOptions,
 )
 from core.config import settings
+from core.env_utils import env_manager
 
-async def verify_deepgram_api_key():
-    """
-    Verifies the Deepgram API key by making a direct HTTP request.
-    This is the most reliable method, independent of SDK changes.
-    Returns True if the key is valid, False otherwise.
-    """
-    if not settings.DEEPGRAM_API_KEY:
-        return False
 
-    url = "https://api.deepgram.com/v1/projects"
-    headers = {
-        "Authorization": f"Token {settings.DEEPGRAM_API_KEY}"
-    }
+def current_deepgram_key():
+    """Read saved credentials at use time, including edits made outside Aura."""
+    saved = env_manager.get_value("DEEPGRAM_API_KEY")
+    return (saved if saved is not None else settings.DEEPGRAM_API_KEY).strip()
+
+
+async def get_deepgram_key_status():
+    key = current_deepgram_key()
+    if not key:
+        return {"valid": False, "message": "Deepgram key is missing. Save it in Advanced Config."}
+
+    # This authenticates the key without requiring project-management scopes.
+    url = "https://api.deepgram.com/v1/auth/token"
+    headers = {"Authorization": f"Token {key}"}
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url, headers=headers)
             if response.status_code == 200:
-                print("INFO: Deepgram API key is valid.")
-                return True
-            else:
-                print(f"ERROR: Deepgram API key verification failed. Status: {response.status_code}, Response: {response.text}")
-                return False
-    except httpx.RequestError as e:
-        print(f"ERROR: A network error occurred while verifying Deepgram key: {e}")
-        return False
+                return {"valid": True, "message": "Deepgram API OK"}
+            messages = {
+                401: "Deepgram rejected the key. Check the key secret and expiration.",
+                403: "Deepgram denied access. Check the key permissions.",
+                429: "Deepgram is rate-limiting requests. Try again shortly.",
+            }
+            return {"valid": False, "message": messages.get(
+                response.status_code, f"Deepgram verification failed (HTTP {response.status_code}). Try again."
+            )}
+    except httpx.RequestError:
+        return {"valid": False, "message": "Could not reach Deepgram. Check your internet connection and retry."}
+
+
+async def verify_deepgram_api_key():
+    return (await get_deepgram_key_status())["valid"]
 
 
 class DeepgramManager:
@@ -57,7 +67,7 @@ class DeepgramManager:
             verbose=False,  # Disable verbose logging to reduce spam
             options={"keepalive": "true"}
         )
-        self.deepgram = DeepgramClient(settings.DEEPGRAM_API_KEY, config)
+        self.deepgram = DeepgramClient(current_deepgram_key(), config)
 
     def get_programming_keyterms(self, user_languages=None):
         """
@@ -191,7 +201,7 @@ class DeepgramManager:
             smart_format=True,
             encoding="linear16",
             channels=1,
-            sample_rate=48000,  # Ensure this matches your audio source
+            sample_rate=48000,  # Pinned client-side by TARGET_SAMPLE_RATE in web/js/audio_handler.js
             diarize=False,
             punctuate=True,
             # Critical speech detection parameters
